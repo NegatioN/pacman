@@ -15,28 +15,31 @@ PLAYER_SPEED  :: 4.0
 TILE_SIZE     :: 32
 PELLET_SIZE   :: 8
 
+Direction :: enum {
+	None,
+	Up,
+	Down,
+	Left,
+	Right,
+}
+
 Texture_Asset :: struct {
-	tex:       ^sdl2.Texture,
-	w:         i32,
-	h:         i32,
-	x:         f32,
-	y:         f32,
-	dest_x:    f32,
-	dest_y:    f32,
-	rotation:  f64,
-	is_moving: bool,
+	tex:         ^sdl2.Texture,
+	w:           i32,
+	h:           i32,
+	x:           f32,
+	y:           f32,
+	dest_x:      f32,
+	dest_y:      f32,
+	rotation:    f64,
+	is_moving:   bool,
+	current_dir: Direction,
+	next_dir:    Direction,
 }
 
 Pellet :: struct {
 	x, y:   f32,
 	active: bool,
-}
-
-Input :: struct {
-	up:    bool,
-	down:  bool,
-	left:  bool,
-	right: bool,
 }
 
 CTX :: struct {
@@ -57,7 +60,6 @@ CTX :: struct {
 	level_offset_x: i32,
 	level_offset_y: i32,
 	
-	input:          Input,
 	should_close:   bool,
 }
 
@@ -149,6 +151,8 @@ init_resources :: proc() -> bool {
 		dest_y = 0,
 		rotation = 0.0,
 		is_moving = false,
+		current_dir = .None,
+		next_dir = .None,
 	}
 
 	// Load Level Data
@@ -272,17 +276,10 @@ process_input :: proc() {
 		case .KEYDOWN:
 			#partial switch e.key.keysym.sym {
 			case .ESCAPE: ctx.should_close = true
-			case .W: ctx.input.up = true
-			case .S: ctx.input.down = true
-			case .A: ctx.input.left = true
-			case .D: ctx.input.right = true
-			}
-		case .KEYUP:
-			#partial switch e.key.keysym.sym {
-			case .W: ctx.input.up = false
-			case .S: ctx.input.down = false
-			case .A: ctx.input.left = false
-			case .D: ctx.input.right = false
+			case .W: ctx.player.next_dir = .Up
+			case .S: ctx.player.next_dir = .Down
+			case .A: ctx.player.next_dir = .Left
+			case .D: ctx.player.next_dir = .Right
 			}
 		}
 	}
@@ -297,27 +294,38 @@ update :: proc() {
 	
 	// Movement Logic
 	if !p.is_moving {
-		next_dx, next_dy: f32 = 0, 0
-		if ctx.input.up {
-			next_dy = -TILE_SIZE
-			p.rotation = 270
-		} else if ctx.input.down {
-			next_dy = TILE_SIZE
-			p.rotation = 90
-		} else if ctx.input.left {
-			next_dx = -TILE_SIZE
-			p.rotation = 180
-		} else if ctx.input.right {
-			next_dx = TILE_SIZE
-			p.rotation = 0
+		// Attempt to turn to next_dir if valid
+		if p.next_dir != .None {
+			dx, dy: f32 = 0, 0
+			switch p.next_dir {
+			case .Up:    dy = -TILE_SIZE
+			case .Down:  dy = TILE_SIZE
+			case .Left:  dx = -TILE_SIZE
+			case .Right: dx = TILE_SIZE
+			case .None: 
+			}
+			
+			if !check_collision(p.x + dx, p.y + dy) {
+				p.current_dir = p.next_dir
+				// Optional: clear next_dir if we want single-turn buffering
+				// p.next_dir = .None 
+			}
+		}
+
+		// Calculate movement based on current_dir
+		dx, dy: f32 = 0, 0
+		switch p.current_dir {
+		case .Up:    dy = -TILE_SIZE; p.rotation = 270
+		case .Down:  dy = TILE_SIZE;  p.rotation = 90
+		case .Left:  dx = -TILE_SIZE; p.rotation = 180
+		case .Right: dx = TILE_SIZE;  p.rotation = 0
+		case .None:
 		}
 		
-		if (next_dx != 0 || next_dy != 0) {
-			if !check_collision(p.x + next_dx, p.y + next_dy) {
-				p.dest_x = p.x + next_dx
-				p.dest_y = p.y + next_dy
-				p.is_moving = true
-			}
+		if (dx != 0 || dy != 0) && !check_collision(p.x + dx, p.y + dy) {
+			p.dest_x = p.x + dx
+			p.dest_y = p.y + dy
+			p.is_moving = true
 		}
 	}
 	
