@@ -11,14 +11,15 @@ WINDOW_TITLE  :: "Odin SDL2 Pacman"
 WINDOW_WIDTH  :: i32(800)
 WINDOW_HEIGHT :: i32(600)
 PLAYER_SPEED  :: 4.0
-TILE_SIZE     :: 32
+TILE_SIZE     :: 48
 
 Texture_Asset :: struct {
-	tex: ^sdl2.Texture,
-	w:   i32,
-	h:   i32,
-	x:   f32,
-	y:   f32,
+	tex:      ^sdl2.Texture,
+	w:        i32,
+	h:        i32,
+	x:        f32,
+	y:        f32,
+	rotation: f64,
 }
 
 Input :: struct {
@@ -35,6 +36,9 @@ CTX :: struct {
 	player:       Texture_Asset,
 	wall_tex:     ^sdl2.Texture,
 	level:        [dynamic]string,
+	
+	level_offset_x: i32,
+	level_offset_y: i32,
 	
 	input:        Input,
 	should_close: bool,
@@ -56,8 +60,7 @@ init_sdl :: proc() -> bool {
 
 	ctx.window = sdl2.CreateWindow(WINDOW_TITLE,
 		sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED,
-		WINDOW_WIDTH,
-		WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
+		WINDOW_WIDTH, WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
 	if ctx.window == nil {
 		log.errorf("Window creation failed: %s", sdl2.GetError())
 		return false
@@ -101,6 +104,7 @@ init_resources :: proc() -> bool {
 		h = h,
 		x = 0,
 		y = 0,
+		rotation = 0.0,
 	}
 
 	// Load Level Data
@@ -113,22 +117,33 @@ init_resources :: proc() -> bool {
 
 	s_data := string(data)
 	it := s_data
+	max_w := 0
 	for line in strings.split_iterator(&it, "\n") {
-		// Clean line
 		trimmed := strings.trim_space(line)
 		if len(trimmed) == 0 { continue }
 		if strings.has_prefix(trimmed, "#") { continue }
 
-		// Check for player start position '3'
-		if idx := strings.index(trimmed, "3"); idx != -1 {
-			ctx.player.x = f32(idx * TILE_SIZE)
-			ctx.player.y = f32(len(ctx.level) * TILE_SIZE)
+		if len(trimmed) > max_w {
+			max_w = len(trimmed)
 		}
-
 		append(&ctx.level, strings.clone(trimmed))
 	}
 
-	log.infof("Loaded level with %d rows", len(ctx.level))
+	// Calculate centering offsets
+	num_h := len(ctx.level)
+	ctx.level_offset_x = (WINDOW_WIDTH - (i32(max_w) * TILE_SIZE)) / 2
+	ctx.level_offset_y = (WINDOW_HEIGHT - (i32(num_h) * TILE_SIZE)) / 2
+
+	// Find player position and apply offsets
+	for row, y in ctx.level {
+		if idx := strings.index(row, "3"); idx != -1 {
+			ctx.player.x = f32(ctx.level_offset_x + i32(idx) * TILE_SIZE)
+			ctx.player.y = f32(ctx.level_offset_y + i32(y) * TILE_SIZE)
+			break
+		}
+	}
+
+	log.infof("Loaded level with %d rows. Offsets: %d, %d", len(ctx.level), ctx.level_offset_x, ctx.level_offset_y)
 	return true
 }
 
@@ -185,12 +200,16 @@ update :: proc() {
 	
 	if ctx.input.up {
 		tex.y -= PLAYER_SPEED
+		tex.rotation = 270
 	} else if ctx.input.down {
 		tex.y += PLAYER_SPEED
+		tex.rotation = 90
 	} else if ctx.input.left {
 		tex.x -= PLAYER_SPEED
+		tex.rotation = 180
 	} else if ctx.input.right {
 		tex.x += PLAYER_SPEED
+		tex.rotation = 0
 	}
 }
 
@@ -203,8 +222,8 @@ draw :: proc() {
 		for char, x in row {
 			if char == '2' {
 				rect := sdl2.Rect{
-					x = i32(x * TILE_SIZE),
-					y = i32(y * TILE_SIZE),
+					x = ctx.level_offset_x + i32(x) * TILE_SIZE,
+					y = ctx.level_offset_y + i32(y) * TILE_SIZE,
 					w = TILE_SIZE,
 					h = TILE_SIZE,
 				}
@@ -218,10 +237,10 @@ draw :: proc() {
 	dst := sdl2.Rect{
 		x = i32(p.x),
 		y = i32(p.y),
-		w = p.w,
-		h = p.h,
+		w = TILE_SIZE,
+		h = TILE_SIZE,
 	}
-	sdl2.RenderCopy(ctx.renderer, p.tex, nil, &dst)
+	sdl2.RenderCopyEx(ctx.renderer, p.tex, nil, &dst, p.rotation, nil, .NONE)
 
 	sdl2.RenderPresent(ctx.renderer)
 }
