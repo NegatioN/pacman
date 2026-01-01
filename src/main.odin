@@ -2,18 +2,28 @@ package main
 
 import "core:fmt"
 import "core:log"
+import "core:math"
 import "core:os"
 import "core:strings"
 import "vendor:sdl2"
 import img "vendor:sdl2/image"
 import ttf "vendor:sdl2/ttf"
 
+// Window and rendering constants
 WINDOW_TITLE  :: "Odin SDL2 Pacman"
 WINDOW_WIDTH  :: i32(800)
 WINDOW_HEIGHT :: i32(600)
-PLAYER_SPEED  :: 4.0
 TILE_SIZE     :: 32
 PELLET_SIZE   :: 8
+
+// Movement speed: how fast lerp_t increments per frame (1.0 = instant)
+MOVE_SPEED :: 0.15
+
+// Tile type constants for level data
+TILE_EMPTY :: '0'
+TILE_PELLET :: '1'
+TILE_WALL  :: '2'
+TILE_SPAWN :: '3'
 
 Direction :: enum {
 	None,
@@ -23,44 +33,49 @@ Direction :: enum {
 	Right,
 }
 
-Texture_Asset :: struct {
-	tex:         ^sdl2.Texture,
-	w:           i32,
-	h:           i32,
-	x:           f32,
-	y:           f32,
-	dest_x:      f32,
-	dest_y:      f32,
-	rotation:    f64,
-	is_moving:   bool,
+// Grid position (logical coordinates)
+GridPos :: struct {
+	x, y: int,
+}
+
+// Entity using grid-based positioning with visual interpolation
+Entity :: struct {
+	pos:         GridPos,  // current logical grid position
+	target:      GridPos,  // target grid position (where we're moving to)
+	lerp_t:      f32,      // interpolation progress: 0.0 = at pos, 1.0 = at target
+	rotation:    f64,      // visual rotation in degrees
 	current_dir: Direction,
 	next_dir:    Direction,
+	tex:         ^sdl2.Texture,
 }
 
 Pellet :: struct {
-	x, y:   f32,
-	active: bool,
+	grid_pos: GridPos,
+	active:   bool,
 }
 
 CTX :: struct {
-	window:         ^sdl2.Window,
-	renderer:       ^sdl2.Renderer,
+	window:       ^sdl2.Window,
+	renderer:     ^sdl2.Renderer,
 	
-	player:         Texture_Asset,
-	wall_tex:       ^sdl2.Texture,
-	pellet_tex:     ^sdl2.Texture,
-	level:          [dynamic]string,
-	pellets:        [dynamic]Pellet,
+	player:       Entity,
+	wall_tex:     ^sdl2.Texture,
+	pellet_tex:   ^sdl2.Texture,
+	level:        [dynamic]string,
+	level_width:  int,
+	level_height: int,
+	pellets:      [dynamic]Pellet,
 	
 	font:           ^ttf.Font,
 	score:          int,
 	pellets_active: int,
 	game_won:       bool,
 	
-	level_offset_x: i32,
-	level_offset_y: i32,
+	// Pixel offset to center level on screen
+	offset_x: i32,
+	offset_y: i32,
 	
-	should_close:   bool,
+	should_close: bool,
 }
 
 ctx := CTX{}
@@ -138,19 +153,13 @@ init_resources :: proc() -> bool {
 		return false
 	}
 
-	// Setup Player Asset
-	w, h: i32
-	sdl2.QueryTexture(player_tex, nil, nil, &w, &h)
-	ctx.player = Texture_Asset{
+	// Setup Player Entity
+	ctx.player = Entity{
 		tex = player_tex,
-		w = w,
-		h = h,
-		x = 0,
-		y = 0,
-		dest_x = 0,
-		dest_y = 0,
+		pos = {0, 0},
+		target = {0, 0},
+		lerp_t = 1.0,  // Start fully arrived
 		rotation = 0.0,
-		is_moving = false,
 		current_dir = .None,
 		next_dir = .None,
 	}
@@ -165,49 +174,40 @@ init_resources :: proc() -> bool {
 
 	s_data := string(data)
 	it := s_data
-	max_w := 0
 	for line in strings.split_iterator(&it, "\n") {
 		trimmed := strings.trim_space(line)
 		if len(trimmed) == 0 { continue }
 		if strings.has_prefix(trimmed, "#") { continue }
 
-		if len(trimmed) > max_w {
-			max_w = len(trimmed)
+		if len(trimmed) > ctx.level_width {
+			ctx.level_width = len(trimmed)
 		}
 		append(&ctx.level, strings.clone(trimmed))
 	}
+	ctx.level_height = len(ctx.level)
 
 	// Calculate centering offsets
-	num_h := len(ctx.level)
-	ctx.level_offset_x = (WINDOW_WIDTH - (i32(max_w) * TILE_SIZE)) / 2
-	ctx.level_offset_y = (WINDOW_HEIGHT - (i32(num_h) * TILE_SIZE)) / 2
+	ctx.offset_x = (WINDOW_WIDTH - i32(ctx.level_width) * TILE_SIZE) / 2
+	ctx.offset_y = (WINDOW_HEIGHT - i32(ctx.level_height) * TILE_SIZE) / 2
 
-	// Initialize Entities
+	// Initialize entities from level data
 	for row, y in ctx.level {
 		for char, x in row {
-			pos_x := f32(ctx.level_offset_x + i32(x) * TILE_SIZE)
-			pos_y := f32(ctx.level_offset_y + i32(y) * TILE_SIZE)
+			grid_pos := GridPos{x, y}
 
-			if char == '3' {
-				ctx.player.x = pos_x
-				ctx.player.y = pos_y
-				ctx.player.dest_x = pos_x
-				ctx.player.dest_y = pos_y
-			} else if char == '1' {
-				// Spawn pellet centered in tile
-				p := Pellet{
-					x = pos_x + f32(TILE_SIZE - PELLET_SIZE)/2,
-					y = pos_y + f32(TILE_SIZE - PELLET_SIZE)/2,
-					active = true,
-				}
-				append(&ctx.pellets, p)
+			switch char {
+			case TILE_SPAWN:
+				ctx.player.pos = grid_pos
+				ctx.player.target = grid_pos
+			case TILE_PELLET:
+				append(&ctx.pellets, Pellet{grid_pos = grid_pos, active = true})
 			}
 		}
 	}
 	
 	ctx.pellets_active = len(ctx.pellets)
 
-	log.infof("Loaded level with %d rows. Offsets: %d, %d", len(ctx.level), ctx.level_offset_x, ctx.level_offset_y)
+	log.infof("Loaded level %dx%d. Offsets: %d, %d", ctx.level_width, ctx.level_height, ctx.offset_x, ctx.offset_y)
 	return true
 }
 
@@ -242,29 +242,41 @@ cleanup :: proc() {
 	sdl2.Quit()
 }
 
-get_tile_at :: proc(x, y: f32) -> u8 {
-	gx := i32((x - f32(ctx.level_offset_x)) / f32(TILE_SIZE))
-	gy := i32((y - f32(ctx.level_offset_y)) / f32(TILE_SIZE))
-
-	if gy < 0 || gy >= i32(len(ctx.level)) {
-		return 0
-	}
-	
-	row := ctx.level[gy]
-	if gx < 0 || gx >= i32(len(row)) {
-		return 0
-	}
-
-	return row[gx]
+// Convert grid position to screen pixel position
+grid_to_screen :: proc(gx, gy: int) -> (x, y: i32) {
+	return ctx.offset_x + i32(gx) * TILE_SIZE, ctx.offset_y + i32(gy) * TILE_SIZE
 }
 
-check_collision :: proc(x, y: f32) -> bool {
-	epsilon :: 1.0
-	if get_tile_at(x + epsilon, y + epsilon) == '2' { return true }
-	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + epsilon) == '2' { return true }
-	if get_tile_at(x + epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
-	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
-	return false
+// Check if a grid cell is walkable (not a wall, and within bounds)
+is_walkable :: proc(gx, gy: int) -> bool {
+	if gy < 0 || gy >= ctx.level_height { return false }
+	row := ctx.level[gy]
+	if gx < 0 || gx >= len(row) { return false }
+	return row[gx] != TILE_WALL
+}
+
+// Get the grid offset for a direction
+dir_to_offset :: proc(dir: Direction) -> (dx, dy: int) {
+	switch dir {
+	case .Up:    return 0, -1
+	case .Down:  return 0, 1
+	case .Left:  return -1, 0
+	case .Right: return 1, 0
+	case .None:  return 0, 0
+	}
+	return 0, 0
+}
+
+// Get rotation angle for a direction
+dir_to_rotation :: proc(dir: Direction) -> f64 {
+	switch dir {
+	case .Up:    return 270
+	case .Down:  return 90
+	case .Left:  return 180
+	case .Right: return 0
+	case .None:  return 0
+	}
+	return 0
 }
 
 process_input :: proc() {
@@ -292,83 +304,47 @@ update :: proc() {
 
 	p := &ctx.player
 	
-	// Movement Logic
-	if !p.is_moving {
-		// Attempt to turn to next_dir if valid
+	// Check if we've finished moving to target
+	if p.lerp_t >= 1.0 {
+		// Snap to target position
+		p.pos = p.target
+		p.lerp_t = 1.0
+		
+		// Try to change to queued direction
 		if p.next_dir != .None {
-			dx, dy: f32 = 0, 0
-			switch p.next_dir {
-			case .Up:    dy = -TILE_SIZE
-			case .Down:  dy = TILE_SIZE
-			case .Left:  dx = -TILE_SIZE
-			case .Right: dx = TILE_SIZE
-			case .None: 
-			}
-			
-			if !check_collision(p.x + dx, p.y + dy) {
+			dx, dy := dir_to_offset(p.next_dir)
+			if is_walkable(p.pos.x + dx, p.pos.y + dy) {
 				p.current_dir = p.next_dir
-				// Optional: clear next_dir if we want single-turn buffering
-				// p.next_dir = .None 
 			}
 		}
-
-		// Calculate movement based on current_dir
-		dx, dy: f32 = 0, 0
-		switch p.current_dir {
-		case .Up:    dy = -TILE_SIZE; p.rotation = 270
-		case .Down:  dy = TILE_SIZE;  p.rotation = 90
-		case .Left:  dx = -TILE_SIZE; p.rotation = 180
-		case .Right: dx = TILE_SIZE;  p.rotation = 0
-		case .None:
-		}
 		
-		if (dx != 0 || dy != 0) && !check_collision(p.x + dx, p.y + dy) {
-			p.dest_x = p.x + dx
-			p.dest_y = p.y + dy
-			p.is_moving = true
-		}
-	}
-	
-	if p.is_moving {
-		if p.x < p.dest_x {
-			p.x += PLAYER_SPEED
-			if p.x > p.dest_x do p.x = p.dest_x
-		} else if p.x > p.dest_x {
-			p.x -= PLAYER_SPEED
-			if p.x < p.dest_x do p.x = p.dest_x
-		}
-		
-		if p.y < p.dest_y {
-			p.y += PLAYER_SPEED
-			if p.y > p.dest_y do p.y = p.dest_y
-		} else if p.y > p.dest_y {
-			p.y -= PLAYER_SPEED
-			if p.y < p.dest_y do p.y = p.dest_y
-		}
-		
-		if p.x == p.dest_x && p.y == p.dest_y {
-			p.is_moving = false
-		}
-	}
-
-	// Pellet Collision Logic
-	player_center_x := p.x + f32(TILE_SIZE)/2
-	player_center_y := p.y + f32(TILE_SIZE)/2
-	
-	for &pellet in ctx.pellets {
-		if pellet.active {
-			pellet_center_x := pellet.x + f32(PELLET_SIZE)/2
-			pellet_center_y := pellet.y + f32(PELLET_SIZE)/2
+		// Try to continue in current direction
+		if p.current_dir != .None {
+			dx, dy := dir_to_offset(p.current_dir)
+			next_x, next_y := p.pos.x + dx, p.pos.y + dy
 			
-			dx := player_center_x - pellet_center_x
-			dy := player_center_y - pellet_center_y
-			dist_sq := dx*dx + dy*dy
-		
-			if dist_sq < 64 {
-				pellet.active = false
-				ctx.score += 10
-				ctx.pellets_active -= 1
+			if is_walkable(next_x, next_y) {
+				p.target = GridPos{next_x, next_y}
+				p.lerp_t = 0.0
+				p.rotation = dir_to_rotation(p.current_dir)
 			}
+		}
+	}
+	
+	// Advance interpolation
+	if p.lerp_t < 1.0 {
+		p.lerp_t += MOVE_SPEED
+		if p.lerp_t > 1.0 {
+			p.lerp_t = 1.0
+		}
+	}
+
+	// Pellet collection: check if player's current grid cell has a pellet
+	for &pellet in ctx.pellets {
+		if pellet.active && pellet.grid_pos == p.pos {
+			pellet.active = false
+			ctx.score += 10
+			ctx.pellets_active -= 1
 		}
 	}
 	
@@ -384,13 +360,9 @@ draw :: proc() {
 	// Draw Level
 	for row, y in ctx.level {
 		for char, x in row {
-			if char == '2' {
-				rect := sdl2.Rect{
-					x = ctx.level_offset_x + i32(x) * TILE_SIZE,
-					y = ctx.level_offset_y + i32(y) * TILE_SIZE,
-					w = TILE_SIZE,
-					h = TILE_SIZE,
-				}
+			if char == TILE_WALL {
+				sx, sy := grid_to_screen(x, y)
+				rect := sdl2.Rect{x = sx, y = sy, w = TILE_SIZE, h = TILE_SIZE}
 				sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
 			}
 		}
@@ -399,24 +371,23 @@ draw :: proc() {
 	// Draw Pellets
 	for pellet in ctx.pellets {
 		if pellet.active {
-			rect := sdl2.Rect{
-				x = i32(pellet.x),
-				y = i32(pellet.y),
-				w = PELLET_SIZE,
-				h = PELLET_SIZE,
-			}
+			sx, sy := grid_to_screen(pellet.grid_pos.x, pellet.grid_pos.y)
+			// Center pellet within tile
+			offset := i32((TILE_SIZE - PELLET_SIZE) / 2)
+			rect := sdl2.Rect{x = sx + offset, y = sy + offset, w = PELLET_SIZE, h = PELLET_SIZE}
 			sdl2.RenderCopy(ctx.renderer, ctx.pellet_tex, nil, &rect)
 		}
 	}
 
-	// Draw Player
+	// Draw Player with interpolation
 	p := ctx.player
-	dst := sdl2.Rect{
-		x = i32(p.x),
-		y = i32(p.y),
-		w = TILE_SIZE,
-		h = TILE_SIZE,
-	}
+	// Lerp between pos and target for smooth movement
+	lerp_x := f32(p.pos.x) + (f32(p.target.x) - f32(p.pos.x)) * p.lerp_t
+	lerp_y := f32(p.pos.y) + (f32(p.target.y) - f32(p.pos.y)) * p.lerp_t
+	screen_x := ctx.offset_x + i32(lerp_x * f32(TILE_SIZE))
+	screen_y := ctx.offset_y + i32(lerp_y * f32(TILE_SIZE))
+	
+	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
 	sdl2.RenderCopyEx(ctx.renderer, p.tex, nil, &dst, p.rotation, nil, .NONE)
 
 	// Draw Score
