@@ -8,18 +8,21 @@ import "vendor:sdl2"
 import img "vendor:sdl2/image"
 
 WINDOW_TITLE  :: "Odin SDL2 Pacman"
-WINDOW_WIDTH  :: i32(800)
-WINDOW_HEIGHT :: i32(600)
+WINDOW_WIDTH  :: i32(1024)
+WINDOW_HEIGHT :: i32(1024)
 PLAYER_SPEED  :: 4.0
-TILE_SIZE     :: 48
+TILE_SIZE     :: 25
 
 Texture_Asset :: struct {
-	tex:      ^sdl2.Texture,
-	w:        i32,
-	h:        i32,
-	x:        f32,
-	y:        f32,
-	rotation: f64,
+	tex:       ^sdl2.Texture,
+	w:         i32,
+	h:         i32,
+	x:         f32,
+	y:         f32,
+	dest_x:    f32,
+	dest_y:    f32,
+	rotation:  f64,
+	is_moving: bool,
 }
 
 Input :: struct {
@@ -104,7 +107,10 @@ init_resources :: proc() -> bool {
 		h = h,
 		x = 0,
 		y = 0,
+		dest_x = 0,
+		dest_y = 0,
 		rotation = 0.0,
+		is_moving = false,
 	}
 
 	// Load Level Data
@@ -137,8 +143,12 @@ init_resources :: proc() -> bool {
 	// Find player position and apply offsets
 	for row, y in ctx.level {
 		if idx := strings.index(row, "3"); idx != -1 {
-			ctx.player.x = f32(ctx.level_offset_x + i32(idx) * TILE_SIZE)
-			ctx.player.y = f32(ctx.level_offset_y + i32(y) * TILE_SIZE)
+			spawn_x := f32(ctx.level_offset_x + i32(idx) * TILE_SIZE)
+			spawn_y := f32(ctx.level_offset_y + i32(y) * TILE_SIZE)
+			ctx.player.x = spawn_x
+			ctx.player.y = spawn_y
+			ctx.player.dest_x = spawn_x
+			ctx.player.dest_y = spawn_y
 			break
 		}
 	}
@@ -195,21 +205,85 @@ process_input :: proc() {
 	}
 }
 
-update :: proc() {
-	tex := &ctx.player
+get_tile_at :: proc(x, y: f32) -> u8 {
+	gx := i32((x - f32(ctx.level_offset_x)) / f32(TILE_SIZE))
+	gy := i32((y - f32(ctx.level_offset_y)) / f32(TILE_SIZE))
+
+	if gy < 0 || gy >= i32(len(ctx.level)) {
+		return 0
+	}
 	
-	if ctx.input.up {
-		tex.y -= PLAYER_SPEED
-		tex.rotation = 270
-	} else if ctx.input.down {
-		tex.y += PLAYER_SPEED
-		tex.rotation = 90
-	} else if ctx.input.left {
-		tex.x -= PLAYER_SPEED
-		tex.rotation = 180
-	} else if ctx.input.right {
-		tex.x += PLAYER_SPEED
-		tex.rotation = 0
+	row := ctx.level[gy]
+	if gx < 0 || gx >= i32(len(row)) {
+		return 0
+	}
+
+	return row[gx]
+}
+
+check_collision :: proc(x, y: f32) -> bool {
+	// Shrink bounding box slightly to forgive edge alignment issues
+	epsilon :: 1.0
+	
+	// Check all 4 corners
+	if get_tile_at(x + epsilon, y + epsilon) == '2' { return true }
+	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + epsilon) == '2' { return true }
+	if get_tile_at(x + epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
+	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
+	
+	return false
+}
+
+update :: proc() {
+	p := &ctx.player
+	
+	if !p.is_moving {
+		// Not moving, check input
+		next_dx, next_dy: f32 = 0, 0
+		if ctx.input.up {
+			next_dy = -TILE_SIZE
+			p.rotation = 270
+		} else if ctx.input.down {
+			next_dy = TILE_SIZE
+			p.rotation = 90
+		} else if ctx.input.left {
+			next_dx = -TILE_SIZE
+			p.rotation = 180
+		} else if ctx.input.right {
+			next_dx = TILE_SIZE
+			p.rotation = 0
+		}
+		
+		if next_dx != 0 || next_dy != 0 {
+			if !check_collision(p.x + next_dx, p.y + next_dy) {
+				p.dest_x = p.x + next_dx
+				p.dest_y = p.y + next_dy
+				p.is_moving = true
+			}
+		}
+	}
+	
+	if p.is_moving {
+		// Move towards destination
+		if p.x < p.dest_x {
+			p.x += PLAYER_SPEED
+			if p.x > p.dest_x do p.x = p.dest_x
+		} else if p.x > p.dest_x {
+			p.x -= PLAYER_SPEED
+			if p.x < p.dest_x do p.x = p.dest_x
+		}
+		
+		if p.y < p.dest_y {
+			p.y += PLAYER_SPEED
+			if p.y > p.dest_y do p.y = p.dest_y
+		} else if p.y > p.dest_y {
+			p.y -= PLAYER_SPEED
+			if p.y < p.dest_y do p.y = p.dest_y
+		}
+		
+		if p.x == p.dest_x && p.y == p.dest_y {
+			p.is_moving = false
+		}
 	}
 }
 
