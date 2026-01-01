@@ -24,6 +24,7 @@ TILE_EMPTY :: '0'
 TILE_PELLET :: '1'
 TILE_WALL  :: '2'
 TILE_SPAWN :: '3'
+TILE_BLINKY :: '4'
 
 Direction :: enum {
 	None,
@@ -59,6 +60,7 @@ CTX :: struct {
 	renderer:     ^sdl2.Renderer,
 	
 	player:       Entity,
+	blinky:       Entity,
 	wall_tex:     ^sdl2.Texture,
 	pellet_tex:   ^sdl2.Texture,
 	level:        [dynamic]string,
@@ -143,6 +145,15 @@ init_resources :: proc() -> bool {
 		return false
 	}
 
+	// Load Ghost Texture
+	ghost_path := "assets/ghost1.png"
+	c_ghost_path := strings.clone_to_cstring(ghost_path, context.temp_allocator)
+	ghost_tex := img.LoadTexture(ctx.renderer, c_ghost_path)
+	if ghost_tex == nil {
+		log.errorf("Failed to load texture %s: %s", ghost_path, sdl2.GetError())
+		return false
+	}
+
 	// Load Font
 	font_path := "/usr/share/fonts/TTF/DejaVuSans.ttf"
 	c_font_path := strings.clone_to_cstring(font_path, context.temp_allocator)
@@ -156,6 +167,17 @@ init_resources :: proc() -> bool {
 	// Setup Player Entity
 	ctx.player = Entity{
 		tex = player_tex,
+		pos = {0, 0},
+		target = {0, 0},
+		lerp_t = 1.0,  // Start fully arrived
+		rotation = 0.0,
+		current_dir = .None,
+		next_dir = .None,
+	}
+
+	// Setup Player Entity
+	ctx.blinky = Entity{
+		tex = ghost_tex,
 		pos = {0, 0},
 		target = {0, 0},
 		lerp_t = 1.0,  // Start fully arrived
@@ -199,6 +221,9 @@ init_resources :: proc() -> bool {
 			case TILE_SPAWN:
 				ctx.player.pos = grid_pos
 				ctx.player.target = grid_pos
+			case TILE_BLINKY:
+				ctx.blinky.pos = grid_pos
+				ctx.blinky.target = grid_pos
 			case TILE_PELLET:
 				append(&ctx.pellets, Pellet{grid_pos = grid_pos, active = true})
 			}
@@ -220,6 +245,9 @@ cleanup :: proc() {
 
 	if ctx.player.tex != nil {
 		sdl2.DestroyTexture(ctx.player.tex)
+	}
+	if ctx.blinky.tex != nil {
+		sdl2.DestroyTexture(ctx.blinky.tex)
 	}
 	if ctx.wall_tex != nil {
 		sdl2.DestroyTexture(ctx.wall_tex)
@@ -297,51 +325,57 @@ process_input :: proc() {
 	}
 }
 
-update :: proc() {
-	if ctx.game_won {
-		return
-	}
+update_ghost1_movement :: proc(entity: ^Entity) {
 
-	p := &ctx.player
-	
+}
+
+update_pacman_movement :: proc(entity: ^Entity) {
 	// Check if we've finished moving to target
-	if p.lerp_t >= 1.0 {
+	if entity.lerp_t >= 1.0 {
 		// Snap to target position
-		p.pos = p.target
-		p.lerp_t = 1.0
+		entity.pos = entity.target
+		entity.lerp_t = 1.0
 		
 		// Try to change to queued direction
-		if p.next_dir != .None {
-			dx, dy := dir_to_offset(p.next_dir)
-			if is_walkable(p.pos.x + dx, p.pos.y + dy) {
-				p.current_dir = p.next_dir
+		if entity.next_dir != .None {
+			dx, dy := dir_to_offset(entity.next_dir)
+			if is_walkable(entity.pos.x + dx, entity.pos.y + dy) {
+				entity.current_dir = entity.next_dir
 			}
 		}
 		
 		// Try to continue in current direction
-		if p.current_dir != .None {
-			dx, dy := dir_to_offset(p.current_dir)
-			next_x, next_y := p.pos.x + dx, p.pos.y + dy
+		if entity.current_dir != .None {
+			dx, dy := dir_to_offset(entity.current_dir)
+			next_x, next_y := entity.pos.x + dx, entity.pos.y + dy
 			
 			if is_walkable(next_x, next_y) {
-				p.target = GridPos{next_x, next_y}
-				p.lerp_t = 0.0
-				p.rotation = dir_to_rotation(p.current_dir)
+				entity.target = GridPos{next_x, next_y}
+				entity.lerp_t = 0.0
+				entity.rotation = dir_to_rotation(entity.current_dir)
 			}
 		}
 	}
 	
 	// Advance interpolation
-	if p.lerp_t < 1.0 {
-		p.lerp_t += MOVE_SPEED
-		if p.lerp_t > 1.0 {
-			p.lerp_t = 1.0
+	if entity.lerp_t < 1.0 {
+		entity.lerp_t += MOVE_SPEED
+		if entity.lerp_t > 1.0 {
+			entity.lerp_t = 1.0
 		}
 	}
+}
+
+update :: proc() {
+	if ctx.game_won {
+		return
+	}
+
+	update_pacman_movement(&ctx.player)
 
 	// Pellet collection: check if player's current grid cell has a pellet
 	for &pellet in ctx.pellets {
-		if pellet.active && pellet.grid_pos == p.pos {
+		if pellet.active && pellet.grid_pos == ctx.player.pos {
 			pellet.active = false
 			ctx.score += 10
 			ctx.pellets_active -= 1
@@ -351,6 +385,18 @@ update :: proc() {
 	if ctx.pellets_active == 0 {
 		ctx.game_won = true
 	}
+}
+
+draw_entity :: proc(entity: ^Entity) {
+// Draw entity with interpolation
+	// Lerp between pos and target for smooth movement
+	lerp_x := f32(entity.pos.x) + (f32(entity.target.x) - f32(entity.pos.x)) * entity.lerp_t
+	lerp_y := f32(entity.pos.y) + (f32(entity.target.y) - f32(entity.pos.y)) * entity.lerp_t
+	screen_x := ctx.offset_x + i32(lerp_x * f32(TILE_SIZE))
+	screen_y := ctx.offset_y + i32(lerp_y * f32(TILE_SIZE))
+
+	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
+	sdl2.RenderCopyEx(ctx.renderer, entity.tex, nil, &dst, entity.rotation, nil, .NONE)
 }
 
 draw :: proc() {
@@ -380,15 +426,8 @@ draw :: proc() {
 	}
 
 	// Draw Player with interpolation
-	p := ctx.player
-	// Lerp between pos and target for smooth movement
-	lerp_x := f32(p.pos.x) + (f32(p.target.x) - f32(p.pos.x)) * p.lerp_t
-	lerp_y := f32(p.pos.y) + (f32(p.target.y) - f32(p.pos.y)) * p.lerp_t
-	screen_x := ctx.offset_x + i32(lerp_x * f32(TILE_SIZE))
-	screen_y := ctx.offset_y + i32(lerp_y * f32(TILE_SIZE))
-	
-	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
-	sdl2.RenderCopyEx(ctx.renderer, p.tex, nil, &dst, p.rotation, nil, .NONE)
+	draw_entity(&ctx.player)
+	draw_entity(&ctx.blinky)
 
 	// Draw Score
 	score_str := fmt.tprintf("Score: %d", ctx.score)
