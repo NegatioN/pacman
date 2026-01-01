@@ -6,12 +6,14 @@ import "core:os"
 import "core:strings"
 import "vendor:sdl2"
 import img "vendor:sdl2/image"
+import ttf "vendor:sdl2/ttf"
 
 WINDOW_TITLE  :: "Odin SDL2 Pacman"
-WINDOW_WIDTH  :: i32(1024)
-WINDOW_HEIGHT :: i32(1024)
+WINDOW_WIDTH  :: i32(800)
+WINDOW_HEIGHT :: i32(600)
 PLAYER_SPEED  :: 4.0
-TILE_SIZE     :: 25
+TILE_SIZE     :: 32
+PELLET_SIZE   :: 8
 
 Texture_Asset :: struct {
 	tex:       ^sdl2.Texture,
@@ -25,6 +27,11 @@ Texture_Asset :: struct {
 	is_moving: bool,
 }
 
+Pellet :: struct {
+	x, y:   f32,
+	active: bool,
+}
+
 Input :: struct {
 	up:    bool,
 	down:  bool,
@@ -33,18 +40,25 @@ Input :: struct {
 }
 
 CTX :: struct {
-	window:       ^sdl2.Window,
-	renderer:     ^sdl2.Renderer,
+	window:         ^sdl2.Window,
+	renderer:       ^sdl2.Renderer,
 	
-	player:       Texture_Asset,
-	wall_tex:     ^sdl2.Texture,
-	level:        [dynamic]string,
+	player:         Texture_Asset,
+	wall_tex:       ^sdl2.Texture,
+	pellet_tex:     ^sdl2.Texture,
+	level:          [dynamic]string,
+	pellets:        [dynamic]Pellet,
+	
+	font:           ^ttf.Font,
+	score:          int,
+	pellets_active: int,
+	game_won:       bool,
 	
 	level_offset_x: i32,
 	level_offset_y: i32,
 	
-	input:        Input,
-	should_close: bool,
+	input:          Input,
+	should_close:   bool,
 }
 
 ctx := CTX{}
@@ -58,6 +72,11 @@ init_sdl :: proc() -> bool {
 	init_flags := img.Init(img.INIT_PNG | img.INIT_JPG)
 	if .PNG not_in init_flags {
 		log.errorf("SDL2 Image Init failed: %s", sdl2.GetError())
+		return false
+	}
+
+	if ttf.Init() < 0 {
+		log.errorf("SDL2 TTF Init failed: %s", sdl2.GetError())
 		return false
 	}
 
@@ -89,12 +108,31 @@ init_resources :: proc() -> bool {
 		return false
 	}
 
+	// Load Pellet Texture
+	pellet_path := "assets/pellet.bmp"
+	c_pellet_path := strings.clone_to_cstring(pellet_path, context.temp_allocator)
+	ctx.pellet_tex = img.LoadTexture(ctx.renderer, c_pellet_path)
+	if ctx.pellet_tex == nil {
+		log.errorf("Failed to load texture %s: %s", pellet_path, sdl2.GetError())
+		return false
+	}
+
 	// Load Player Texture
 	pac_path := "assets/pacman.png"
 	c_pac_path := strings.clone_to_cstring(pac_path, context.temp_allocator)
 	player_tex := img.LoadTexture(ctx.renderer, c_pac_path)
 	if player_tex == nil {
 		log.errorf("Failed to load texture %s: %s", pac_path, sdl2.GetError())
+		return false
+	}
+
+	// Load Font
+	font_path := "/usr/share/fonts/TTF/DejaVuSans.ttf"
+	c_font_path := strings.clone_to_cstring(font_path, context.temp_allocator)
+	
+	ctx.font = ttf.OpenFont(c_font_path, 24)
+	if ctx.font == nil {
+		log.errorf("Failed to load font %s: %s", font_path, sdl2.GetError())
 		return false
 	}
 
@@ -140,18 +178,30 @@ init_resources :: proc() -> bool {
 	ctx.level_offset_x = (WINDOW_WIDTH - (i32(max_w) * TILE_SIZE)) / 2
 	ctx.level_offset_y = (WINDOW_HEIGHT - (i32(num_h) * TILE_SIZE)) / 2
 
-	// Find player position and apply offsets
+	// Initialize Entities
 	for row, y in ctx.level {
-		if idx := strings.index(row, "3"); idx != -1 {
-			spawn_x := f32(ctx.level_offset_x + i32(idx) * TILE_SIZE)
-			spawn_y := f32(ctx.level_offset_y + i32(y) * TILE_SIZE)
-			ctx.player.x = spawn_x
-			ctx.player.y = spawn_y
-			ctx.player.dest_x = spawn_x
-			ctx.player.dest_y = spawn_y
-			break
+		for char, x in row {
+			pos_x := f32(ctx.level_offset_x + i32(x) * TILE_SIZE)
+			pos_y := f32(ctx.level_offset_y + i32(y) * TILE_SIZE)
+
+			if char == '3' {
+				ctx.player.x = pos_x
+				ctx.player.y = pos_y
+				ctx.player.dest_x = pos_x
+				ctx.player.dest_y = pos_y
+			} else if char == '1' {
+				// Spawn pellet centered in tile
+				p := Pellet{
+					x = pos_x + f32(TILE_SIZE - PELLET_SIZE)/2,
+					y = pos_y + f32(TILE_SIZE - PELLET_SIZE)/2,
+					active = true,
+				}
+				append(&ctx.pellets, p)
+			}
 		}
 	}
+	
+	ctx.pellets_active = len(ctx.pellets)
 
 	log.infof("Loaded level with %d rows. Offsets: %d, %d", len(ctx.level), ctx.level_offset_x, ctx.level_offset_y)
 	return true
@@ -162,12 +212,19 @@ cleanup :: proc() {
 		delete(line)
 	}
 	delete(ctx.level)
+	delete(ctx.pellets)
 
 	if ctx.player.tex != nil {
 		sdl2.DestroyTexture(ctx.player.tex)
 	}
 	if ctx.wall_tex != nil {
 		sdl2.DestroyTexture(ctx.wall_tex)
+	}
+	if ctx.pellet_tex != nil {
+		sdl2.DestroyTexture(ctx.pellet_tex)
+	}
+	if ctx.font != nil {
+		ttf.CloseFont(ctx.font)
 	}
 
 	if ctx.renderer != nil {
@@ -176,8 +233,34 @@ cleanup :: proc() {
 	if ctx.window != nil {
 		sdl2.DestroyWindow(ctx.window)
 	}
+	ttf.Quit()
 	img.Quit()
 	sdl2.Quit()
+}
+
+get_tile_at :: proc(x, y: f32) -> u8 {
+	gx := i32((x - f32(ctx.level_offset_x)) / f32(TILE_SIZE))
+	gy := i32((y - f32(ctx.level_offset_y)) / f32(TILE_SIZE))
+
+	if gy < 0 || gy >= i32(len(ctx.level)) {
+		return 0
+	}
+	
+	row := ctx.level[gy]
+	if gx < 0 || gx >= i32(len(row)) {
+		return 0
+	}
+
+	return row[gx]
+}
+
+check_collision :: proc(x, y: f32) -> bool {
+	epsilon :: 1.0
+	if get_tile_at(x + epsilon, y + epsilon) == '2' { return true }
+	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + epsilon) == '2' { return true }
+	if get_tile_at(x + epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
+	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
+	return false
 }
 
 process_input :: proc() {
@@ -205,40 +288,15 @@ process_input :: proc() {
 	}
 }
 
-get_tile_at :: proc(x, y: f32) -> u8 {
-	gx := i32((x - f32(ctx.level_offset_x)) / f32(TILE_SIZE))
-	gy := i32((y - f32(ctx.level_offset_y)) / f32(TILE_SIZE))
-
-	if gy < 0 || gy >= i32(len(ctx.level)) {
-		return 0
-	}
-	
-	row := ctx.level[gy]
-	if gx < 0 || gx >= i32(len(row)) {
-		return 0
-	}
-
-	return row[gx]
-}
-
-check_collision :: proc(x, y: f32) -> bool {
-	// Shrink bounding box slightly to forgive edge alignment issues
-	epsilon :: 1.0
-	
-	// Check all 4 corners
-	if get_tile_at(x + epsilon, y + epsilon) == '2' { return true }
-	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + epsilon) == '2' { return true }
-	if get_tile_at(x + epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
-	if get_tile_at(x + f32(TILE_SIZE) - epsilon, y + f32(TILE_SIZE) - epsilon) == '2' { return true }
-	
-	return false
-}
-
 update :: proc() {
+	if ctx.game_won {
+		return
+	}
+
 	p := &ctx.player
 	
+	// Movement Logic
 	if !p.is_moving {
-		// Not moving, check input
 		next_dx, next_dy: f32 = 0, 0
 		if ctx.input.up {
 			next_dy = -TILE_SIZE
@@ -254,7 +312,7 @@ update :: proc() {
 			p.rotation = 0
 		}
 		
-		if next_dx != 0 || next_dy != 0 {
+		if (next_dx != 0 || next_dy != 0) {
 			if !check_collision(p.x + next_dx, p.y + next_dy) {
 				p.dest_x = p.x + next_dx
 				p.dest_y = p.y + next_dy
@@ -264,7 +322,6 @@ update :: proc() {
 	}
 	
 	if p.is_moving {
-		// Move towards destination
 		if p.x < p.dest_x {
 			p.x += PLAYER_SPEED
 			if p.x > p.dest_x do p.x = p.dest_x
@@ -285,10 +342,35 @@ update :: proc() {
 			p.is_moving = false
 		}
 	}
+
+	// Pellet Collision Logic
+	player_center_x := p.x + f32(TILE_SIZE)/2
+	player_center_y := p.y + f32(TILE_SIZE)/2
+	
+	for &pellet in ctx.pellets {
+		if pellet.active {
+			pellet_center_x := pellet.x + f32(PELLET_SIZE)/2
+			pellet_center_y := pellet.y + f32(PELLET_SIZE)/2
+			
+			dx := player_center_x - pellet_center_x
+			dy := player_center_y - pellet_center_y
+			dist_sq := dx*dx + dy*dy
+		
+			if dist_sq < 64 {
+				pellet.active = false
+				ctx.score += 10
+				ctx.pellets_active -= 1
+			}
+		}
+	}
+	
+	if ctx.pellets_active == 0 {
+		ctx.game_won = true
+	}
 }
 
 draw :: proc() {
-	sdl2.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255) // Black background
+	sdl2.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255)
 	sdl2.RenderClear(ctx.renderer)
 
 	// Draw Level
@@ -301,8 +383,21 @@ draw :: proc() {
 					w = TILE_SIZE,
 					h = TILE_SIZE,
 				}
-			sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
+				sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
 			}
+		}
+	}
+
+	// Draw Pellets
+	for pellet in ctx.pellets {
+		if pellet.active {
+			rect := sdl2.Rect{
+				x = i32(pellet.x),
+				y = i32(pellet.y),
+				w = PELLET_SIZE,
+				h = PELLET_SIZE,
+			}
+			sdl2.RenderCopy(ctx.renderer, ctx.pellet_tex, nil, &rect)
 		}
 	}
 
@@ -315,6 +410,52 @@ draw :: proc() {
 		h = TILE_SIZE,
 	}
 	sdl2.RenderCopyEx(ctx.renderer, p.tex, nil, &dst, p.rotation, nil, .NONE)
+
+	// Draw Score
+	score_str := fmt.tprintf("Score: %d", ctx.score)
+	c_score_str := strings.clone_to_cstring(score_str, context.temp_allocator)
+	white := sdl2.Color{255, 255, 255, 255}
+	surface := ttf.RenderText_Solid(ctx.font, c_score_str, white)
+	if surface != nil {
+		texture := sdl2.CreateTextureFromSurface(ctx.renderer, surface)
+		if texture != nil {
+			w, h: i32
+			sdl2.QueryTexture(texture, nil, nil, &w, &h)
+			dst := sdl2.Rect{
+				x = WINDOW_WIDTH - w - 20,
+				y = 20,
+				w = w,
+				h = h,
+			}
+			sdl2.RenderCopy(ctx.renderer, texture, nil, &dst)
+			sdl2.DestroyTexture(texture)
+		}
+		sdl2.FreeSurface(surface)
+	}
+	
+	// Draw Win Message
+	if ctx.game_won {
+		c_win_str := strings.clone_to_cstring("YOU WIN!", context.temp_allocator)
+		yellow := sdl2.Color{255, 255, 0, 255}
+		win_surface := ttf.RenderText_Solid(ctx.font, c_win_str, yellow)
+		if win_surface != nil {
+			texture := sdl2.CreateTextureFromSurface(ctx.renderer, win_surface)
+			if texture != nil {
+				w, h: i32
+				sdl2.QueryTexture(texture, nil, nil, &w, &h)
+				// Scale it up manually for the prototype win message
+				dst := sdl2.Rect{
+					x = (WINDOW_WIDTH - w * 3) / 2,
+					y = (WINDOW_HEIGHT - h * 3) / 2,
+					w = w * 3,
+					h = h * 3,
+				}
+				sdl2.RenderCopy(ctx.renderer, texture, nil, &dst)
+				sdl2.DestroyTexture(texture)
+			}
+			sdl2.FreeSurface(win_surface)
+		}
+	}
 
 	sdl2.RenderPresent(ctx.renderer)
 }
