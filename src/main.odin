@@ -26,6 +26,7 @@ TILE_WALL  :: '2'
 TILE_SPAWN :: '3'
 TILE_BLINKY :: '4'
 
+
 Direction :: enum {
 	None,
 	Up,
@@ -33,6 +34,8 @@ Direction :: enum {
 	Left,
 	Right,
 }
+
+DIRECTIONS := [4]Direction{.Left, .Right, .Up, .Down}
 
 // Grid position (logical coordinates)
 GridPos :: struct {
@@ -325,11 +328,84 @@ process_input :: proc() {
 	}
 }
 
-update_ghost1_movement :: proc(entity: ^Entity) {
-
+ValidDirection :: struct {
+ up,down,left,right: bool
+}
+get_opposite_dir :: proc(dir: Direction) -> Direction {
+	switch dir {
+		case .Up: return .Down
+		case .Down: return .Up
+		case .Left: return .Right
+		case .Right: return .Left
+		case .None: return .None
+	}
+	return .None
+}
+set_valid_dir :: proc(dir: Direction, vd: ^ValidDirection, flag:bool=true){
+	switch dir {
+	case .Up: vd.up = flag
+	case .Down: vd.down = flag
+	case .Left:vd.left = flag
+	case .Right:vd.right = flag
+	case .None:
+	}
+}
+dist_sq :: proc(a, b: GridPos) -> int {
+	dx := a.x - b.x
+	dy := a.y - b.y
+	return dx*dx + dy*dy
+}
+//TODO dont allocate :shrug:
+dir_to_gridpos :: proc(pos: GridPos, dir: Direction) -> GridPos {
+	dx, dy := dir_to_offset(dir)
+	return GridPos{pos.x + dx, pos.y + dy}
 }
 
-update_pacman_movement :: proc(entity: ^Entity) {
+
+update_blinky_target :: proc(entity: ^Entity) {
+	//TODO update the simulation through update_pacman_movement?
+	//this can be allocated statically across all entities as long as we run on one core?
+	if entity.lerp_t >= 1.0 {
+		valid_directions := [len(DIRECTIONS)]bool{}
+		opposite_dir := get_opposite_dir(entity.current_dir)
+		opposite_dir_idx := -1
+		for d, i in DIRECTIONS {
+			if d == opposite_dir {
+				opposite_dir_idx = i
+			}
+			dx, dy := dir_to_offset(d)
+			if is_walkable(entity.pos.x + dx, entity.pos.y + dy) {
+				valid_directions[i] = true
+			}
+		}
+
+		if opposite_dir_idx != -1 {
+			valid_directions[opposite_dir_idx] = false //TODO might need to be done after we check if there are other valid directions in case of blind alleys
+			log.infof("Opposite blinky direction %v", DIRECTIONS[opposite_dir_idx])
+		}
+
+		// calculate distances for all valid directions, and find best direction
+		best_score := max(int)
+		best_dir_ind := -1
+		for vd, i in valid_directions {
+			if vd {
+				cur_score := dist_sq(entity.pos, dir_to_gridpos(entity.pos, DIRECTIONS[i]))
+				if cur_score <= best_score {
+					best_score = cur_score
+					best_dir_ind = i
+				}
+			}
+		}
+
+		//TODO whats going on here. We're not supposed to be able to end up having None be the best direction.
+
+		log.infof("Best blinky direction %v", DIRECTIONS[best_dir_ind])
+		entity.next_dir = DIRECTIONS[best_dir_ind]
+	}
+	update_entity_movement(entity)
+}
+
+update_entity_movement :: proc(entity: ^Entity) {
 	// Check if we've finished moving to target
 	if entity.lerp_t >= 1.0 {
 		// Snap to target position
@@ -370,8 +446,8 @@ update :: proc() {
 	if ctx.game_won {
 		return
 	}
-
-	update_pacman_movement(&ctx.player)
+	update_blinky_target(&ctx.blinky)
+	update_entity_movement(&ctx.player)
 
 	// Pellet collection: check if player's current grid cell has a pellet
 	for &pellet in ctx.pellets {
