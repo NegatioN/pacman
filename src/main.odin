@@ -363,8 +363,6 @@ dir_to_gridpos :: proc(pos: GridPos, dir: Direction) -> GridPos {
 
 
 update_blinky_target :: proc(entity: ^Entity) {
-	//TODO update the simulation through update_pacman_movement?
-	//this can be allocated statically across all entities as long as we run on one core?
 	if entity.lerp_t >= 1.0 {
 		valid_directions := [len(DIRECTIONS)]bool{}
 		opposite_dir := get_opposite_dir(entity.current_dir)
@@ -381,7 +379,6 @@ update_blinky_target :: proc(entity: ^Entity) {
 
 		if opposite_dir_idx != -1 {
 			valid_directions[opposite_dir_idx] = false //TODO might need to be done after we check if there are other valid directions in case of blind alleys
-			log.infof("Opposite blinky direction %v", DIRECTIONS[opposite_dir_idx])
 		}
 
 		// calculate distances for all valid directions, and find best direction
@@ -389,17 +386,13 @@ update_blinky_target :: proc(entity: ^Entity) {
 		best_dir_ind := -1
 		for vd, i in valid_directions {
 			if vd {
-				cur_score := dist_sq(entity.pos, dir_to_gridpos(entity.pos, DIRECTIONS[i]))
+				cur_score := dist_sq(ctx.player.pos, dir_to_gridpos(entity.pos, DIRECTIONS[i]))
 				if cur_score <= best_score {
 					best_score = cur_score
 					best_dir_ind = i
 				}
 			}
 		}
-
-		//TODO whats going on here. We're not supposed to be able to end up having None be the best direction.
-
-		log.infof("Best blinky direction %v", DIRECTIONS[best_dir_ind])
 		entity.next_dir = DIRECTIONS[best_dir_ind]
 	}
 	update_entity_movement(entity)
