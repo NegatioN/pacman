@@ -105,6 +105,7 @@ CTX :: struct {
 	offset_x: i32,
 	offset_y: i32,
 	
+	current_fps: int,
 	should_close: bool,
 }
 
@@ -129,7 +130,8 @@ init_sdl :: proc() -> bool {
 
 	ctx.window = sdl2.CreateWindow(WINDOW_TITLE,
 		sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED,
-		WINDOW_WIDTH, WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
+		WINDOW_WIDTH,
+		WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
 	if ctx.window == nil {
 		log.errorf("Window creation failed: %s", sdl2.GetError())
 		return false
@@ -250,16 +252,15 @@ init_resources :: proc() -> bool {
 					entity = Entity{
 						tex = tex,
 						pos = spawn_ghosts_at,
-						target = spawn_ghosts_at,
-						lerp_t = 1.0,
-						current_dir = .None,
-						next_dir = .None,
-					},
-					type = gt,
-					home_pos = spawn_ghosts_at,
-					scatter_pos = scatter_targets[i],
-					eaten = false,
-				}
+					target = spawn_ghosts_at,
+					lerp_t = 1.0,
+					current_dir = .None,
+					next_dir = .None,
+				},
+				type = gt,
+				home_pos = spawn_ghosts_at,
+				scatter_pos = scatter_targets[i],
+			}
 			append(&ctx.ghosts, g)
 			}
 		}
@@ -564,7 +565,7 @@ update :: proc(dt: f32) {
 						} else {
 							g.current_dir = get_opposite_dir(g.current_dir)
 						}
-					}
+						}
 				}
 			}
 		}
@@ -585,7 +586,8 @@ draw_entity :: proc(entity: ^Entity) {
 	
 	// Add color modulation for visual feedback
 	sdl2.SetTextureColorMod(entity.tex, 255, 255, 255) // Reset
-	sdl2.RenderCopyEx(ctx.renderer, entity.tex, nil, &dst, entity.rotation, nil, .NONE)
+	
+sdl2.RenderCopyEx(ctx.renderer, entity.tex, nil, &dst, entity.rotation, nil, .NONE)
 }
 
 draw :: proc() {
@@ -641,9 +643,9 @@ draw :: proc() {
 		sdl2.SetTextureAlphaMod(g.tex, 255)
 	}
 
-	score_str := fmt.tprintf("Score: %d", ctx.score)
+	score_str := fmt.tprintf("FPS: %d  Score: %d", ctx.current_fps, ctx.score)
 	if ctx.scatter_mode_timer > 0 {
-		score_str = fmt.tprintf("Score: %d (SCATTER %.1f)", ctx.score, ctx.scatter_mode_timer)
+		score_str = fmt.tprintf("FPS: %d  Score: %d (SCATTER %.1f)", ctx.current_fps, ctx.score, ctx.scatter_mode_timer)
 	}
 	
 	c_score_str := strings.clone_to_cstring(score_str, context.temp_allocator)
@@ -713,11 +715,25 @@ main :: proc() {
 
 	last_count := sdl2.GetPerformanceCounter()
 	freq := sdl2.GetPerformanceFrequency()
+	
+	frame_counter := 0
+	time_accumulator: f64 = 0
 
 	for !ctx.should_close {
 		current_count := sdl2.GetPerformanceCounter()
-		dt := f32(current_count - last_count) / f32(freq)
+		dt_raw := f64(current_count - last_count) / f64(freq)
+		
 		last_count = current_count
+		dt := f32(dt_raw)
+		
+		// FPS Counter logic
+		frame_counter += 1
+		time_accumulator += dt_raw
+		if time_accumulator >= 1.0 {
+			ctx.current_fps = frame_counter
+			frame_counter = 0
+			time_accumulator -= 1.0
+		}
 
 		process_input()
 		update(dt)
