@@ -20,12 +20,11 @@ PELLET_SIZE   :: 8
 MOVE_SPEED :: 0.15
 
 // Tile type constants for level data
-TILE_EMPTY :: '0'
+TILE_EMPTY  :: '0'
 TILE_PELLET :: '1'
-TILE_WALL  :: '2'
-TILE_SPAWN :: '3'
-TILE_BLINKY :: '4'
-
+TILE_WALL   :: '2'
+TILE_SPAWN  :: '3'
+TILE_GHOST_HOUSE :: '4'
 
 Direction :: enum {
 	None,
@@ -53,30 +52,45 @@ Entity :: struct {
 	tex:         ^sdl2.Texture,
 }
 
+GhostType :: enum {
+	Blinky,
+	Pinky,
+	Inky,
+	Clyde,
+}
+
+Ghost :: struct {
+	using entity: Entity,
+	type:         GhostType,
+	scatter_pos:  GridPos,
+	home_pos:     GridPos,
+}
+
 Pellet :: struct {
 	grid_pos: GridPos,
 	active:   bool,
 }
 
 CTX :: struct {
-	window:       ^sdl2.Window,
-	renderer:     ^sdl2.Renderer,
+	window:         ^sdl2.Window,
+	renderer:       ^sdl2.Renderer,
 	
-	player:       Entity,
-	blinky:       Entity,
-	wall_tex:     ^sdl2.Texture,
-	pellet_tex:   ^sdl2.Texture,
-	level:        [dynamic]string,
-	level_width:  int,
-	level_height: int,
-	pellets:      [dynamic]Pellet,
+	player:         Entity,
+	ghosts:         [dynamic]Ghost,
+	
+	wall_tex:       ^sdl2.Texture,
+	pellet_tex:     ^sdl2.Texture,
+	
+	level:          [dynamic]string,
+	level_width:    int,
+	level_height:   int,
+	pellets:        [dynamic]Pellet,
 	
 	font:           ^ttf.Font,
 	score:          int,
 	pellets_active: int,
 	game_won:       bool,
 	
-	// Pixel offset to center level on screen
 	offset_x: i32,
 	offset_y: i32,
 	
@@ -110,7 +124,6 @@ init_sdl :: proc() -> bool {
 		return false
 	}
 
-	// Enable VSync
 	ctx.renderer = sdl2.CreateRenderer(ctx.window, -1, sdl2.RENDERER_ACCELERATED + sdl2.RENDERER_PRESENTVSYNC)
 	if ctx.renderer == nil {
 		log.errorf("Renderer creation failed: %s", sdl2.GetError())
@@ -120,44 +133,25 @@ init_sdl :: proc() -> bool {
 	return true
 }
 
+load_texture :: proc(path: string) -> ^sdl2.Texture {
+	c_path := strings.clone_to_cstring(path, context.temp_allocator)
+	tex := img.LoadTexture(ctx.renderer, c_path)
+	if tex == nil {
+		log.errorf("Failed to load texture %s: %s", path, sdl2.GetError())
+	}
+	return tex
+}
+
 init_resources :: proc() -> bool {
-	// Load Wall Texture
-	wall_path := "assets/wall.png"
-	c_wall_path := strings.clone_to_cstring(wall_path, context.temp_allocator)
-	ctx.wall_tex = img.LoadTexture(ctx.renderer, c_wall_path)
-	if ctx.wall_tex == nil {
-		log.errorf("Failed to load texture %s: %s", wall_path, sdl2.GetError())
-		return false
-	}
+	ctx.wall_tex = load_texture("assets/wall.png")
+	if ctx.wall_tex == nil { return false }
 
-	// Load Pellet Texture
-	pellet_path := "assets/pellet.bmp"
-	c_pellet_path := strings.clone_to_cstring(pellet_path, context.temp_allocator)
-	ctx.pellet_tex = img.LoadTexture(ctx.renderer, c_pellet_path)
-	if ctx.pellet_tex == nil {
-		log.errorf("Failed to load texture %s: %s", pellet_path, sdl2.GetError())
-		return false
-	}
+	ctx.pellet_tex = load_texture("assets/pellet.bmp")
+	if ctx.pellet_tex == nil { return false }
 
-	// Load Player Texture
-	pac_path := "assets/pacman.png"
-	c_pac_path := strings.clone_to_cstring(pac_path, context.temp_allocator)
-	player_tex := img.LoadTexture(ctx.renderer, c_pac_path)
-	if player_tex == nil {
-		log.errorf("Failed to load texture %s: %s", pac_path, sdl2.GetError())
-		return false
-	}
+	player_tex := load_texture("assets/pacman.png")
+	if player_tex == nil { return false }
 
-	// Load Ghost Texture
-	ghost_path := "assets/ghost1.png"
-	c_ghost_path := strings.clone_to_cstring(ghost_path, context.temp_allocator)
-	ghost_tex := img.LoadTexture(ctx.renderer, c_ghost_path)
-	if ghost_tex == nil {
-		log.errorf("Failed to load texture %s: %s", ghost_path, sdl2.GetError())
-		return false
-	}
-
-	// Load Font
 	font_path := "/usr/share/fonts/TTF/DejaVuSans.ttf"
 	c_font_path := strings.clone_to_cstring(font_path, context.temp_allocator)
 	
@@ -167,29 +161,16 @@ init_resources :: proc() -> bool {
 		return false
 	}
 
-	// Setup Player Entity
 	ctx.player = Entity{
 		tex = player_tex,
 		pos = {0, 0},
 		target = {0, 0},
-		lerp_t = 1.0,  // Start fully arrived
+		lerp_t = 1.0,
 		rotation = 0.0,
 		current_dir = .None,
 		next_dir = .None,
 	}
 
-	// Setup Player Entity
-	ctx.blinky = Entity{
-		tex = ghost_tex,
-		pos = {0, 0},
-		target = {0, 0},
-		lerp_t = 1.0,  // Start fully arrived
-		rotation = 0.0,
-		current_dir = .None,
-		next_dir = .None,
-	}
-
-	// Load Level Data
 	data, ok := os.read_entire_file("data/level.dat")
 	if !ok {
 		log.errorf("Failed to read data/level.dat")
@@ -211,11 +192,12 @@ init_resources :: proc() -> bool {
 	}
 	ctx.level_height = len(ctx.level)
 
-	// Calculate centering offsets
 	ctx.offset_x = (WINDOW_WIDTH - i32(ctx.level_width) * TILE_SIZE) / 2
 	ctx.offset_y = (WINDOW_HEIGHT - i32(ctx.level_height) * TILE_SIZE) / 2
 
-	// Initialize entities from level data
+	spawn_ghosts_at := GridPos{0, 0}
+	found_ghost_spawn := false
+
 	for row, y in ctx.level {
 		for char, x in row {
 			grid_pos := GridPos{x, y}
@@ -224,11 +206,43 @@ init_resources :: proc() -> bool {
 			case TILE_SPAWN:
 				ctx.player.pos = grid_pos
 				ctx.player.target = grid_pos
-			case TILE_BLINKY:
-				ctx.blinky.pos = grid_pos
-				ctx.blinky.target = grid_pos
+			case TILE_GHOST_HOUSE:
+				spawn_ghosts_at = grid_pos
+				found_ghost_spawn = true
 			case TILE_PELLET:
 				append(&ctx.pellets, Pellet{grid_pos = grid_pos, active = true})
+			}
+		}
+	}
+	
+	if found_ghost_spawn {
+		ghost_types := [?]GhostType{.Blinky, .Pinky, .Inky, .Clyde}
+		tex_names   := [?]string{"assets/blinky.png", "assets/pinky.png", "assets/inky.png", "assets/clyde.png"}
+		
+		scatter_targets := [?]GridPos{
+			{ctx.level_width-2, 1}, 
+			{1, 1}, 
+			{ctx.level_width-2, ctx.level_height-2}, 
+			{1, ctx.level_height-2},
+		}
+
+		for gt, i in ghost_types {
+			tex := load_texture(tex_names[i])
+			if tex != nil {
+				g := Ghost{
+					entity = Entity{
+						tex = tex,
+						pos = spawn_ghosts_at,
+						target = spawn_ghosts_at,
+						lerp_t = 1.0,
+						current_dir = .None,
+						next_dir = .None,
+					},
+					type = gt,
+					home_pos = spawn_ghosts_at,
+					scatter_pos = scatter_targets[i],
+				}
+			append(&ctx.ghosts, g)
 			}
 		}
 	}
@@ -249,9 +263,11 @@ cleanup :: proc() {
 	if ctx.player.tex != nil {
 		sdl2.DestroyTexture(ctx.player.tex)
 	}
-	if ctx.blinky.tex != nil {
-		sdl2.DestroyTexture(ctx.blinky.tex)
+	for g in ctx.ghosts {
+		if g.tex != nil do sdl2.DestroyTexture(g.tex)
 	}
+	delete(ctx.ghosts)
+
 	if ctx.wall_tex != nil {
 		sdl2.DestroyTexture(ctx.wall_tex)
 	}
@@ -273,12 +289,10 @@ cleanup :: proc() {
 	sdl2.Quit()
 }
 
-// Convert grid position to screen pixel position
 grid_to_screen :: proc(gx, gy: int) -> (x, y: i32) {
 	return ctx.offset_x + i32(gx) * TILE_SIZE, ctx.offset_y + i32(gy) * TILE_SIZE
 }
 
-// Check if a grid cell is walkable (not a wall, and within bounds)
 is_walkable :: proc(gx, gy: int) -> bool {
 	if gy < 0 || gy >= ctx.level_height { return false }
 	row := ctx.level[gy]
@@ -286,7 +300,6 @@ is_walkable :: proc(gx, gy: int) -> bool {
 	return row[gx] != TILE_WALL
 }
 
-// Get the grid offset for a direction
 dir_to_offset :: proc(dir: Direction) -> (dx, dy: int) {
 	switch dir {
 	case .Up:    return 0, -1
@@ -298,7 +311,6 @@ dir_to_offset :: proc(dir: Direction) -> (dx, dy: int) {
 	return 0, 0
 }
 
-// Get rotation angle for a direction
 dir_to_rotation :: proc(dir: Direction) -> f64 {
 	switch dir {
 	case .Up:    return 270
@@ -308,6 +320,28 @@ dir_to_rotation :: proc(dir: Direction) -> f64 {
 	case .None:  return 0
 	}
 	return 0
+}
+
+get_opposite_dir :: proc(dir: Direction) -> Direction {
+	switch dir {
+	case .Up:    return .Down
+	case .Down:  return .Up
+	case .Left:  return .Right
+	case .Right: return .Left
+	case .None:  return .None
+	}
+	return .None
+}
+
+dist_sq :: proc(a, b: GridPos) -> int {
+	dx := a.x - b.x
+	dy := a.y - b.y
+	return dx*dx + dy*dy
+}
+
+dir_to_gridpos :: proc(pos: GridPos, dir: Direction) -> GridPos {
+	dx, dy := dir_to_offset(dir)
+	return GridPos{pos.x + dx, pos.y + dy}
 }
 
 process_input :: proc() {
@@ -328,84 +362,84 @@ process_input :: proc() {
 	}
 }
 
-ValidDirection :: struct {
- up,down,left,right: bool
-}
-get_opposite_dir :: proc(dir: Direction) -> Direction {
-	switch dir {
-		case .Up: return .Down
-		case .Down: return .Up
-		case .Left: return .Right
-		case .Right: return .Left
-		case .None: return .None
+get_ghost_target :: proc(ghost: ^Ghost) -> GridPos {
+	pacman_pos := ctx.player.target
+	pacman_dir := ctx.player.current_dir
+
+	switch ghost.type {
+	case .Blinky:
+		return pacman_pos
+	case .Pinky:
+		dx, dy := dir_to_offset(pacman_dir)
+		return GridPos{pacman_pos.x + dx * 4, pacman_pos.y + dy * 4}
+	case .Inky:
+		dx, dy := dir_to_offset(pacman_dir)
+		return GridPos{pacman_pos.x + dx * 2, pacman_pos.y + dy * 2}
+	case .Clyde:
+		d_sq := dist_sq(ghost.pos, pacman_pos)
+		if d_sq > 64 {
+			return pacman_pos
+		} else {
+			return ghost.scatter_pos
+		}
 	}
-	return .None
-}
-set_valid_dir :: proc(dir: Direction, vd: ^ValidDirection, flag:bool=true){
-	switch dir {
-	case .Up: vd.up = flag
-	case .Down: vd.down = flag
-	case .Left:vd.left = flag
-	case .Right:vd.right = flag
-	case .None:
-	}
-}
-dist_sq :: proc(a, b: GridPos) -> int {
-	dx := a.x - b.x
-	dy := a.y - b.y
-	return dx*dx + dy*dy
-}
-//TODO dont allocate :shrug:
-dir_to_gridpos :: proc(pos: GridPos, dir: Direction) -> GridPos {
-	dx, dy := dir_to_offset(dir)
-	return GridPos{pos.x + dx, pos.y + dy}
+	return pacman_pos
 }
 
-
-update_blinky_target :: proc(entity: ^Entity) {
-	if entity.lerp_t >= 1.0 {
+update_ghost_ai :: proc(ghost: ^Ghost) {
+	if ghost.lerp_t >= 1.0 {
+		origin := ghost.target
+		
 		valid_directions := [len(DIRECTIONS)]bool{}
-		opposite_dir := get_opposite_dir(entity.current_dir)
-		opposite_dir_idx := -1
+		opposite_dir := get_opposite_dir(ghost.current_dir)
+		
+		valid_count := 0
 		for d, i in DIRECTIONS {
-			if d == opposite_dir {
-				opposite_dir_idx = i
-			}
 			dx, dy := dir_to_offset(d)
-			if is_walkable(entity.pos.x + dx, entity.pos.y + dy) {
+			if is_walkable(origin.x + dx, origin.y + dy) {
 				valid_directions[i] = true
+				valid_count += 1
 			}
 		}
 
-		if opposite_dir_idx != -1 {
-			valid_directions[opposite_dir_idx] = false //TODO might need to be done after we check if there are other valid directions in case of blind alleys
+		if valid_count > 1 {
+			for d, i in DIRECTIONS {
+				if d == opposite_dir {
+					valid_directions[i] = false
+				}
+			}
 		}
 
-		// calculate distances for all valid directions, and find best direction
 		best_score := max(int)
 		best_dir_ind := -1
+		
+		target_tile := get_ghost_target(ghost)
+		
 		for vd, i in valid_directions {
 			if vd {
-				cur_score := dist_sq(ctx.player.pos, dir_to_gridpos(entity.pos, DIRECTIONS[i]))
-				if cur_score <= best_score {
+				neighbor := dir_to_gridpos(origin, DIRECTIONS[i])
+				cur_score := dist_sq(neighbor, target_tile)
+				if cur_score < best_score {
 					best_score = cur_score
 					best_dir_ind = i
 				}
 			}
 		}
-		entity.next_dir = DIRECTIONS[best_dir_ind]
+
+		if best_dir_ind != -1 {
+			ghost.next_dir = DIRECTIONS[best_dir_ind]
+		} else {
+			ghost.next_dir = opposite_dir
+		}
 	}
-	update_entity_movement(entity)
+	update_entity_movement(&ghost.entity)
 }
 
 update_entity_movement :: proc(entity: ^Entity) {
-	// Check if we've finished moving to target
 	if entity.lerp_t >= 1.0 {
-		// Snap to target position
 		entity.pos = entity.target
 		entity.lerp_t = 1.0
 		
-		// Try to change to queued direction
 		if entity.next_dir != .None {
 			dx, dy := dir_to_offset(entity.next_dir)
 			if is_walkable(entity.pos.x + dx, entity.pos.y + dy) {
@@ -413,7 +447,6 @@ update_entity_movement :: proc(entity: ^Entity) {
 			}
 		}
 		
-		// Try to continue in current direction
 		if entity.current_dir != .None {
 			dx, dy := dir_to_offset(entity.current_dir)
 			next_x, next_y := entity.pos.x + dx, entity.pos.y + dy
@@ -426,7 +459,6 @@ update_entity_movement :: proc(entity: ^Entity) {
 		}
 	}
 	
-	// Advance interpolation
 	if entity.lerp_t < 1.0 {
 		entity.lerp_t += MOVE_SPEED
 		if entity.lerp_t > 1.0 {
@@ -439,10 +471,13 @@ update :: proc() {
 	if ctx.game_won {
 		return
 	}
-	update_blinky_target(&ctx.blinky)
+	
+	for &g in ctx.ghosts {
+		update_ghost_ai(&g)
+	}
+	
 	update_entity_movement(&ctx.player)
 
-	// Pellet collection: check if player's current grid cell has a pellet
 	for &pellet in ctx.pellets {
 		if pellet.active && pellet.grid_pos == ctx.player.pos {
 			pellet.active = false
@@ -457,8 +492,6 @@ update :: proc() {
 }
 
 draw_entity :: proc(entity: ^Entity) {
-// Draw entity with interpolation
-	// Lerp between pos and target for smooth movement
 	lerp_x := f32(entity.pos.x) + (f32(entity.target.x) - f32(entity.pos.x)) * entity.lerp_t
 	lerp_y := f32(entity.pos.y) + (f32(entity.target.y) - f32(entity.pos.y)) * entity.lerp_t
 	screen_x := ctx.offset_x + i32(lerp_x * f32(TILE_SIZE))
@@ -472,7 +505,6 @@ draw :: proc() {
 	sdl2.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255)
 	sdl2.RenderClear(ctx.renderer)
 
-	// Draw Level
 	for row, y in ctx.level {
 		for char, x in row {
 			if char == TILE_WALL {
@@ -483,22 +515,20 @@ draw :: proc() {
 		}
 	}
 
-	// Draw Pellets
 	for pellet in ctx.pellets {
 		if pellet.active {
 			sx, sy := grid_to_screen(pellet.grid_pos.x, pellet.grid_pos.y)
-			// Center pellet within tile
 			offset := i32((TILE_SIZE - PELLET_SIZE) / 2)
 			rect := sdl2.Rect{x = sx + offset, y = sy + offset, w = PELLET_SIZE, h = PELLET_SIZE}
 			sdl2.RenderCopy(ctx.renderer, ctx.pellet_tex, nil, &rect)
 		}
 	}
 
-	// Draw Player with interpolation
 	draw_entity(&ctx.player)
-	draw_entity(&ctx.blinky)
+	for &g in ctx.ghosts {
+		draw_entity(&g.entity)
+	}
 
-	// Draw Score
 	score_str := fmt.tprintf("Score: %d", ctx.score)
 	c_score_str := strings.clone_to_cstring(score_str, context.temp_allocator)
 	white := sdl2.Color{255, 255, 255, 255}
@@ -520,7 +550,6 @@ draw :: proc() {
 		sdl2.FreeSurface(surface)
 	}
 	
-	// Draw Win Message
 	if ctx.game_won {
 		c_win_str := strings.clone_to_cstring("YOU WIN!", context.temp_allocator)
 		yellow := sdl2.Color{255, 255, 0, 255}
@@ -530,14 +559,13 @@ draw :: proc() {
 			if texture != nil {
 				w, h: i32
 				sdl2.QueryTexture(texture, nil, nil, &w, &h)
-				// Scale it up manually for the prototype win message
 				dst := sdl2.Rect{
 					x = (WINDOW_WIDTH - w * 3) / 2,
 					y = (WINDOW_HEIGHT - h * 3) / 2,
 					w = w * 3,
 					h = h * 3,
 				}
-				sdl2.RenderCopy(ctx.renderer, texture, nil, &dst)
+			sdl2.RenderCopy(ctx.renderer, texture, nil, &dst)
 				sdl2.DestroyTexture(texture)
 			}
 			sdl2.FreeSurface(win_surface)
