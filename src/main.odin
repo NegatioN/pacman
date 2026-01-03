@@ -17,11 +17,11 @@ TILE_SIZE     :: 32
 PELLET_SIZE   :: 8
 POWER_PELLET_SIZE :: 16
 
-// Movement speed: how fast lerp_t increments per frame (1.0 = instant)
-MOVE_SPEED :: 0.15
+// Movement speed in tiles per second
+TILE_SPEED :: 6.0
 
-// Scatter mode duration in frames (assuming ~60 FPS)
-SCATTER_DURATION :: 600
+// Scatter mode duration in seconds
+SCATTER_DURATION :: 8.0
 
 // Tile type constants for level data
 TILE_EMPTY  :: '0'
@@ -98,7 +98,7 @@ CTX :: struct {
 	pellets_active: int,
 	game_won:       bool,
 	
-	scatter_mode_timer: int,
+	scatter_mode_timer: f32, // Time remaining in seconds
 	
 	offset_x: i32,
 	offset_y: i32,
@@ -127,13 +127,13 @@ init_sdl :: proc() -> bool {
 
 	ctx.window = sdl2.CreateWindow(WINDOW_TITLE,
 		sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED,
-		WINDOW_WIDTH,
-		WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
+		WINDOW_WIDTH, WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
 	if ctx.window == nil {
 		log.errorf("Window creation failed: %s", sdl2.GetError())
 		return false
 	}
 
+	// Enable VSync
 	ctx.renderer = sdl2.CreateRenderer(ctx.window, -1, sdl2.RENDERER_ACCELERATED + sdl2.RENDERER_PRESENTVSYNC)
 	if ctx.renderer == nil {
 		log.errorf("Renderer creation failed: %s", sdl2.GetError())
@@ -248,15 +248,15 @@ init_resources :: proc() -> bool {
 					entity = Entity{
 						tex = tex,
 						pos = spawn_ghosts_at,
-					target = spawn_ghosts_at,
-					lerp_t = 1.0,
-					current_dir = .None,
-					next_dir = .None,
-				},
-				type = gt,
-				home_pos = spawn_ghosts_at,
-				scatter_pos = scatter_targets[i],
-			}
+						target = spawn_ghosts_at,
+						lerp_t = 1.0,
+						current_dir = .None,
+						next_dir = .None,
+					},
+					type = gt,
+					home_pos = spawn_ghosts_at,
+					scatter_pos = scatter_targets[i],
+				}
 			append(&ctx.ghosts, g)
 			}
 		}
@@ -409,7 +409,7 @@ get_ghost_target :: proc(ghost: ^Ghost) -> GridPos {
 	return pacman_pos
 }
 
-update_ghost_ai :: proc(ghost: ^Ghost) {
+update_ghost_ai :: proc(ghost: ^Ghost, dt: f32) {
 	if ghost.lerp_t >= 1.0 {
 		origin := ghost.target
 		
@@ -455,10 +455,10 @@ update_ghost_ai :: proc(ghost: ^Ghost) {
 			ghost.next_dir = opposite_dir
 		}
 	}
-	update_entity_movement(&ghost.entity)
+	update_entity_movement(&ghost.entity, dt)
 }
 
-update_entity_movement :: proc(entity: ^Entity) {
+update_entity_movement :: proc(entity: ^Entity, dt: f32) {
 	if entity.lerp_t >= 1.0 {
 		entity.pos = entity.target
 		entity.lerp_t = 1.0
@@ -483,27 +483,27 @@ update_entity_movement :: proc(entity: ^Entity) {
 	}
 	
 	if entity.lerp_t < 1.0 {
-		entity.lerp_t += MOVE_SPEED
+		entity.lerp_t += TILE_SPEED * dt
 		if entity.lerp_t > 1.0 {
 			entity.lerp_t = 1.0
 		}
 	}
 }
 
-update :: proc() {
+update :: proc(dt: f32) {
 	if ctx.game_won {
 		return
 	}
 	
 	if ctx.scatter_mode_timer > 0 {
-		ctx.scatter_mode_timer -= 1
+		ctx.scatter_mode_timer -= dt
 	}
 	
 	for &g in ctx.ghosts {
-		update_ghost_ai(&g)
+		update_ghost_ai(&g, dt)
 	}
 	
-	update_entity_movement(&ctx.player)
+	update_entity_movement(&ctx.player, dt)
 
 	for &pellet in ctx.pellets {
 		if pellet.active && pellet.grid_pos == ctx.player.pos {
@@ -515,19 +515,19 @@ update :: proc() {
 				log.info("Scatter Mode Activated!")
 				
 				// Reverse all ghosts immediately
-				for &g in ctx.ghosts {
-					if g.lerp_t < 1.0 {
-						// Moving: Flip pos/target and lerp
-						g.pos, g.target = g.target, g.pos
-						g.lerp_t = 1.0 - g.lerp_t
-						g.current_dir = get_opposite_dir(g.current_dir)
-						g.next_dir = .None
-					} else {
-						// Stationary: just flip direction so they are forced to turn around
-						g.current_dir = get_opposite_dir(g.current_dir)
-					}
+			for &g in ctx.ghosts {
+				if g.lerp_t < 1.0 {
+					// Moving: Flip pos/target and lerp
+					g.pos, g.target = g.target, g.pos
+					g.lerp_t = 1.0 - g.lerp_t
+					g.current_dir = get_opposite_dir(g.current_dir)
+				g.next_dir = .None
+				} else {
+					// Stationary: just flip direction so they are forced to turn around
+				g.current_dir = get_opposite_dir(g.current_dir)
 				}
 			}
+		}
 		}
 	}
 	
@@ -555,7 +555,7 @@ draw :: proc() {
 			if char == TILE_WALL {
 				sx, sy := grid_to_screen(x, y)
 				rect := sdl2.Rect{x = sx, y = sy, w = TILE_SIZE, h = TILE_SIZE}
-				sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
+			sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
 			}
 		}
 	}
@@ -644,9 +644,16 @@ main :: proc() {
 		return
 	}
 
+	last_count := sdl2.GetPerformanceCounter()
+	freq := sdl2.GetPerformanceFrequency()
+
 	for !ctx.should_close {
+		current_count := sdl2.GetPerformanceCounter()
+		dt := f32(current_count - last_count) / f32(freq)
+		last_count = current_count
+
 		process_input()
-		update()
+		update(dt)
 		draw()
 	}
 }
