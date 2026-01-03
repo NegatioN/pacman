@@ -15,6 +15,7 @@ WINDOW_WIDTH  :: i32(800)
 WINDOW_HEIGHT :: i32(600)
 TILE_SIZE     :: 32
 PELLET_SIZE   :: 8
+POWER_PELLET_SIZE :: 16
 
 // Movement speed: how fast lerp_t increments per frame (1.0 = instant)
 MOVE_SPEED :: 0.15
@@ -25,6 +26,7 @@ TILE_PELLET :: '1'
 TILE_WALL   :: '2'
 TILE_SPAWN  :: '3'
 TILE_GHOST_HOUSE :: '4'
+TILE_POWER_PELLET :: '5'
 
 Direction :: enum {
 	None,
@@ -69,6 +71,7 @@ Ghost :: struct {
 Pellet :: struct {
 	grid_pos: GridPos,
 	active:   bool,
+	is_power: bool,
 }
 
 CTX :: struct {
@@ -80,6 +83,7 @@ CTX :: struct {
 	
 	wall_tex:       ^sdl2.Texture,
 	pellet_tex:     ^sdl2.Texture,
+	power_pellet_tex: ^sdl2.Texture,
 	
 	level:          [dynamic]string,
 	level_width:    int,
@@ -149,6 +153,9 @@ init_resources :: proc() -> bool {
 	ctx.pellet_tex = load_texture("assets/pellet.bmp")
 	if ctx.pellet_tex == nil { return false }
 
+	ctx.power_pellet_tex = load_texture("assets/power_pellet.bmp")
+	if ctx.power_pellet_tex == nil { return false }
+
 	player_tex := load_texture("assets/pacman.png")
 	if player_tex == nil { return false }
 
@@ -210,7 +217,9 @@ init_resources :: proc() -> bool {
 				spawn_ghosts_at = grid_pos
 				found_ghost_spawn = true
 			case TILE_PELLET:
-				append(&ctx.pellets, Pellet{grid_pos = grid_pos, active = true})
+				append(&ctx.pellets, Pellet{grid_pos = grid_pos, active = true, is_power = false})
+			case TILE_POWER_PELLET:
+				append(&ctx.pellets, Pellet{grid_pos = grid_pos, active = true, is_power = true})
 			}
 		}
 	}
@@ -273,6 +282,9 @@ cleanup :: proc() {
 	}
 	if ctx.pellet_tex != nil {
 		sdl2.DestroyTexture(ctx.pellet_tex)
+	}
+	if ctx.power_pellet_tex != nil {
+		sdl2.DestroyTexture(ctx.power_pellet_tex)
 	}
 	if ctx.font != nil {
 		ttf.CloseFont(ctx.font)
@@ -483,6 +495,10 @@ update :: proc() {
 			pellet.active = false
 			ctx.score += 10
 			ctx.pellets_active -= 1
+			if pellet.is_power {
+				// TODO: Enable scatter mode
+				log.info("Power pellet eaten!")
+			}
 		}
 	}
 	
@@ -510,7 +526,7 @@ draw :: proc() {
 			if char == TILE_WALL {
 				sx, sy := grid_to_screen(x, y)
 				rect := sdl2.Rect{x = sx, y = sy, w = TILE_SIZE, h = TILE_SIZE}
-				sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
+			sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
 			}
 		}
 	}
@@ -518,9 +534,17 @@ draw :: proc() {
 	for pellet in ctx.pellets {
 		if pellet.active {
 			sx, sy := grid_to_screen(pellet.grid_pos.x, pellet.grid_pos.y)
-			offset := i32((TILE_SIZE - PELLET_SIZE) / 2)
-			rect := sdl2.Rect{x = sx + offset, y = sy + offset, w = PELLET_SIZE, h = PELLET_SIZE}
-			sdl2.RenderCopy(ctx.renderer, ctx.pellet_tex, nil, &rect)
+			
+			size := i32(PELLET_SIZE)
+			tex := ctx.pellet_tex
+			if pellet.is_power {
+				size = POWER_PELLET_SIZE
+				tex = ctx.power_pellet_tex
+			}
+			
+			offset := (TILE_SIZE - size) / 2
+			rect := sdl2.Rect{x = sx + offset, y = sy + offset, w = size, h = size}
+			sdl2.RenderCopy(ctx.renderer, tex, nil, &rect)
 		}
 	}
 
