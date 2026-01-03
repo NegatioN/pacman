@@ -69,6 +69,7 @@ Ghost :: struct {
 	type:         GhostType,
 	scatter_pos:  GridPos,
 	home_pos:     GridPos,
+	eaten:        bool,
 }
 
 Pellet :: struct {
@@ -97,6 +98,7 @@ CTX :: struct {
 	score:          int,
 	pellets_active: int,
 	game_won:       bool,
+	game_over:      bool,
 	
 	scatter_mode_timer: f32, // Time remaining in seconds
 	
@@ -256,6 +258,7 @@ init_resources :: proc() -> bool {
 					type = gt,
 					home_pos = spawn_ghosts_at,
 					scatter_pos = scatter_targets[i],
+					eaten = false,
 				}
 			append(&ctx.ghosts, g)
 			}
@@ -381,6 +384,11 @@ process_input :: proc() {
 }
 
 get_ghost_target :: proc(ghost: ^Ghost) -> GridPos {
+	// If eaten, go home
+	if ghost.eaten {
+		return ghost.home_pos
+	}
+
 	// If in scatter mode, return scatter position
 	if ctx.scatter_mode_timer > 0 {
 		return ghost.scatter_pos
@@ -410,6 +418,12 @@ get_ghost_target :: proc(ghost: ^Ghost) -> GridPos {
 }
 
 update_ghost_ai :: proc(ghost: ^Ghost, dt: f32) {
+	// Check if eaten ghost has reached home
+	if ghost.eaten && ghost.pos == ghost.home_pos && ghost.lerp_t >= 1.0 {
+		ghost.eaten = false
+		log.info("Ghost respawned!")
+	}
+
 	if ghost.lerp_t >= 1.0 {
 		origin := ghost.target
 		
@@ -455,10 +469,19 @@ update_ghost_ai :: proc(ghost: ^Ghost, dt: f32) {
 			ghost.next_dir = opposite_dir
 		}
 	}
-	update_entity_movement(&ghost.entity, dt)
+	
+	// Speed multiplier for eaten ghosts
+	speed_mult: f32 = 1.0
+	if ghost.eaten {
+		speed_mult = 2.0
+	} else if ctx.scatter_mode_timer > 0 {
+		speed_mult = 0.6 // Slower in scatter mode
+	}
+	
+	update_entity_movement(&ghost.entity, dt, speed_mult)
 }
 
-update_entity_movement :: proc(entity: ^Entity, dt: f32) {
+update_entity_movement :: proc(entity: ^Entity, dt: f32, speed_mult: f32 = 1.0) {
 	if entity.lerp_t >= 1.0 {
 		entity.pos = entity.target
 		entity.lerp_t = 1.0
@@ -483,7 +506,7 @@ update_entity_movement :: proc(entity: ^Entity, dt: f32) {
 	}
 	
 	if entity.lerp_t < 1.0 {
-		entity.lerp_t += TILE_SPEED * dt
+		entity.lerp_t += TILE_SPEED * dt * speed_mult
 		if entity.lerp_t > 1.0 {
 			entity.lerp_t = 1.0
 		}
@@ -491,7 +514,7 @@ update_entity_movement :: proc(entity: ^Entity, dt: f32) {
 }
 
 update :: proc(dt: f32) {
-	if ctx.game_won {
+	if ctx.game_won || ctx.game_over {
 		return
 	}
 	
@@ -501,6 +524,22 @@ update :: proc(dt: f32) {
 	
 	for &g in ctx.ghosts {
 		update_ghost_ai(&g, dt)
+		
+		// Collision detection Player <-> Ghost
+		// Using simple grid overlap for now, or lerped distance
+		// Grid overlap is safest for discrete logic
+		if g.pos == ctx.player.pos {
+			if ctx.scatter_mode_timer > 0 && !g.eaten {
+				// Eat ghost
+				g.eaten = true
+				ctx.score += 100
+				log.info("Ghost Eaten!")
+			} else if !g.eaten {
+				// Game Over
+				ctx.game_over = true
+				log.info("GAME OVER")
+			}
+		}
 	}
 	
 	update_entity_movement(&ctx.player, dt)
@@ -515,19 +554,19 @@ update :: proc(dt: f32) {
 				log.info("Scatter Mode Activated!")
 				
 				// Reverse all ghosts immediately
-			for &g in ctx.ghosts {
-				if g.lerp_t < 1.0 {
-					// Moving: Flip pos/target and lerp
-					g.pos, g.target = g.target, g.pos
-					g.lerp_t = 1.0 - g.lerp_t
-					g.current_dir = get_opposite_dir(g.current_dir)
-				g.next_dir = .None
-				} else {
-					// Stationary: just flip direction so they are forced to turn around
-				g.current_dir = get_opposite_dir(g.current_dir)
+				for &g in ctx.ghosts {
+					if !g.eaten {
+						if g.lerp_t < 1.0 {
+							g.pos, g.target = g.target, g.pos
+							g.lerp_t = 1.0 - g.lerp_t
+							g.current_dir = get_opposite_dir(g.current_dir)
+							g.next_dir = .None
+						} else {
+							g.current_dir = get_opposite_dir(g.current_dir)
+						}
+					}
 				}
 			}
-		}
 		}
 	}
 	
@@ -543,6 +582,9 @@ draw_entity :: proc(entity: ^Entity) {
 	screen_y := ctx.offset_y + i32(lerp_y * f32(TILE_SIZE))
 
 	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
+	
+	// Add color modulation for visual feedback
+	sdl2.SetTextureColorMod(entity.tex, 255, 255, 255) // Reset
 	sdl2.RenderCopyEx(ctx.renderer, entity.tex, nil, &dst, entity.rotation, nil, .NONE)
 }
 
@@ -555,7 +597,7 @@ draw :: proc() {
 			if char == TILE_WALL {
 				sx, sy := grid_to_screen(x, y)
 				rect := sdl2.Rect{x = sx, y = sy, w = TILE_SIZE, h = TILE_SIZE}
-			sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
+				sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
 			}
 		}
 	}
@@ -578,13 +620,30 @@ draw :: proc() {
 	}
 
 	draw_entity(&ctx.player)
+	
 	for &g in ctx.ghosts {
+		// Visual feedback for ghost states
+		if g.eaten {
+			sdl2.SetTextureColorMod(g.tex, 255, 255, 255) // Eyes? Just transparent/faded
+			sdl2.SetTextureAlphaMod(g.tex, 100)
+		} else if ctx.scatter_mode_timer > 0 {
+			sdl2.SetTextureColorMod(g.tex, 0, 0, 255) // Blue-ish
+			sdl2.SetTextureAlphaMod(g.tex, 255)
+		} else {
+			sdl2.SetTextureColorMod(g.tex, 255, 255, 255)
+			sdl2.SetTextureAlphaMod(g.tex, 255)
+		}
+		
 		draw_entity(&g.entity)
+		
+		// Reset mod for safety
+		sdl2.SetTextureColorMod(g.tex, 255, 255, 255)
+		sdl2.SetTextureAlphaMod(g.tex, 255)
 	}
 
 	score_str := fmt.tprintf("Score: %d", ctx.score)
 	if ctx.scatter_mode_timer > 0 {
-		score_str = fmt.tprintf("Score: %d (SCATTER)", ctx.score)
+		score_str = fmt.tprintf("Score: %d (SCATTER %.1f)", ctx.score, ctx.scatter_mode_timer)
 	}
 	
 	c_score_str := strings.clone_to_cstring(score_str, context.temp_allocator)
@@ -607,12 +666,20 @@ draw :: proc() {
 		sdl2.FreeSurface(surface)
 	}
 	
+	message := ""
+	color := sdl2.Color{255, 255, 0, 255}
 	if ctx.game_won {
-		c_win_str := strings.clone_to_cstring("YOU WIN!", context.temp_allocator)
-		yellow := sdl2.Color{255, 255, 0, 255}
-		win_surface := ttf.RenderText_Solid(ctx.font, c_win_str, yellow)
-		if win_surface != nil {
-			texture := sdl2.CreateTextureFromSurface(ctx.renderer, win_surface)
+		message = "YOU WIN!"
+	} else if ctx.game_over {
+		message = "GAME OVER"
+		color = sdl2.Color{255, 0, 0, 255}
+	}
+	
+	if len(message) > 0 {
+		c_msg := strings.clone_to_cstring(message, context.temp_allocator)
+		msg_surface := ttf.RenderText_Solid(ctx.font, c_msg, color)
+		if msg_surface != nil {
+			texture := sdl2.CreateTextureFromSurface(ctx.renderer, msg_surface)
 			if texture != nil {
 				w, h: i32
 				sdl2.QueryTexture(texture, nil, nil, &w, &h)
@@ -622,10 +689,10 @@ draw :: proc() {
 					w = w * 3,
 					h = h * 3,
 				}
-			sdl2.RenderCopy(ctx.renderer, texture, nil, &dst)
+				sdl2.RenderCopy(ctx.renderer, texture, nil, &dst)
 				sdl2.DestroyTexture(texture)
 			}
-			sdl2.FreeSurface(win_surface)
+			sdl2.FreeSurface(msg_surface)
 		}
 	}
 
