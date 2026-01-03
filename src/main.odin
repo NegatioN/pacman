@@ -20,6 +20,9 @@ POWER_PELLET_SIZE :: 16
 // Movement speed: how fast lerp_t increments per frame (1.0 = instant)
 MOVE_SPEED :: 0.15
 
+// Scatter mode duration in frames (assuming ~60 FPS)
+SCATTER_DURATION :: 600
+
 // Tile type constants for level data
 TILE_EMPTY  :: '0'
 TILE_PELLET :: '1'
@@ -95,6 +98,8 @@ CTX :: struct {
 	pellets_active: int,
 	game_won:       bool,
 	
+	scatter_mode_timer: int,
+	
 	offset_x: i32,
 	offset_y: i32,
 	
@@ -122,7 +127,8 @@ init_sdl :: proc() -> bool {
 
 	ctx.window = sdl2.CreateWindow(WINDOW_TITLE,
 		sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED,
-		WINDOW_WIDTH, WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
+		WINDOW_WIDTH,
+		WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
 	if ctx.window == nil {
 		log.errorf("Window creation failed: %s", sdl2.GetError())
 		return false
@@ -242,15 +248,15 @@ init_resources :: proc() -> bool {
 					entity = Entity{
 						tex = tex,
 						pos = spawn_ghosts_at,
-						target = spawn_ghosts_at,
-						lerp_t = 1.0,
-						current_dir = .None,
-						next_dir = .None,
-					},
-					type = gt,
-					home_pos = spawn_ghosts_at,
-					scatter_pos = scatter_targets[i],
-				}
+					target = spawn_ghosts_at,
+					lerp_t = 1.0,
+					current_dir = .None,
+					next_dir = .None,
+				},
+				type = gt,
+				home_pos = spawn_ghosts_at,
+				scatter_pos = scatter_targets[i],
+			}
 			append(&ctx.ghosts, g)
 			}
 		}
@@ -375,6 +381,11 @@ process_input :: proc() {
 }
 
 get_ghost_target :: proc(ghost: ^Ghost) -> GridPos {
+	// If in scatter mode, return scatter position
+	if ctx.scatter_mode_timer > 0 {
+		return ghost.scatter_pos
+	}
+
 	pacman_pos := ctx.player.target
 	pacman_dir := ctx.player.current_dir
 
@@ -484,6 +495,10 @@ update :: proc() {
 		return
 	}
 	
+	if ctx.scatter_mode_timer > 0 {
+		ctx.scatter_mode_timer -= 1
+	}
+	
 	for &g in ctx.ghosts {
 		update_ghost_ai(&g)
 	}
@@ -496,8 +511,22 @@ update :: proc() {
 			ctx.score += 10
 			ctx.pellets_active -= 1
 			if pellet.is_power {
-				// TODO: Enable scatter mode
-				log.info("Power pellet eaten!")
+				ctx.scatter_mode_timer = SCATTER_DURATION
+				log.info("Scatter Mode Activated!")
+				
+				// Reverse all ghosts immediately
+				for &g in ctx.ghosts {
+					if g.lerp_t < 1.0 {
+						// Moving: Flip pos/target and lerp
+						g.pos, g.target = g.target, g.pos
+						g.lerp_t = 1.0 - g.lerp_t
+						g.current_dir = get_opposite_dir(g.current_dir)
+						g.next_dir = .None
+					} else {
+						// Stationary: just flip direction so they are forced to turn around
+						g.current_dir = get_opposite_dir(g.current_dir)
+					}
+				}
 			}
 		}
 	}
@@ -526,7 +555,7 @@ draw :: proc() {
 			if char == TILE_WALL {
 				sx, sy := grid_to_screen(x, y)
 				rect := sdl2.Rect{x = sx, y = sy, w = TILE_SIZE, h = TILE_SIZE}
-			sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
+				sdl2.RenderCopy(ctx.renderer, ctx.wall_tex, nil, &rect)
 			}
 		}
 	}
@@ -554,6 +583,10 @@ draw :: proc() {
 	}
 
 	score_str := fmt.tprintf("Score: %d", ctx.score)
+	if ctx.scatter_mode_timer > 0 {
+		score_str = fmt.tprintf("Score: %d (SCATTER)", ctx.score)
+	}
+	
 	c_score_str := strings.clone_to_cstring(score_str, context.temp_allocator)
 	white := sdl2.Color{255, 255, 255, 255}
 	surface := ttf.RenderText_Solid(ctx.font, c_score_str, white)
