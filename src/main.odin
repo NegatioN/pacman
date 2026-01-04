@@ -44,6 +44,13 @@ MovementState :: enum {
 	MovingToTile,
 }
 
+GhostType :: enum {
+	Blinky,
+	Pinky,
+	Inky,
+	Clyde,
+}
+
 DIRECTIONS := [4]Direction{.Left, .Right, .Up, .Down}
 
 // Grid position (logical coordinates)
@@ -61,13 +68,6 @@ Entity :: struct {
 	current_dir:   Direction,
 	next_dir:      Direction,
 	tex:           ^sdl2.Texture,
-}
-
-GhostType :: enum {
-	Blinky,
-	Pinky,
-	Inky,
-	Clyde,
 }
 
 Ghost :: struct {
